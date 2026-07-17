@@ -69,12 +69,23 @@
 
       <div class="concurrency">
         <label for="concurrencyRange" class="concurrency__label">
-          并发数 <span id="concurrencyValue" class="concurrency__value">3</span>
+          主机并发数 <span id="concurrencyValue" class="concurrency__value">3</span>
           <span class="concurrency__hint">— 同时运行的主机数量，每个主机不会被重复运行</span>
         </label>
         <div class="concurrency__row">
           <input type="range" id="concurrencyRange" min="1" max="100" value="3" />
           <input type="number" id="concurrencyNumber" min="1" max="100" value="3" class="concurrency__number" />
+        </div>
+      </div>
+
+      <div class="concurrency">
+        <label for="modelConcurrencyRange" class="concurrency__label">
+          单主机内模型并发数 <span id="modelConcurrencyValue" class="concurrency__value">4</span>
+          <span class="concurrency__hint">— 同一主机内同时测试几个模型；目标主机若只有单卡/单模型槽位，调太高不一定更快，反而可能超时增多</span>
+        </label>
+        <div class="concurrency__row">
+          <input type="range" id="modelConcurrencyRange" min="1" max="20" value="4" />
+          <input type="number" id="modelConcurrencyNumber" min="1" max="20" value="4" class="concurrency__number" />
         </div>
       </div>
 

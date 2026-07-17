@@ -22,6 +22,9 @@ const radar = document.getElementById('radar');
 const concurrencyRange = document.getElementById('concurrencyRange');
 const concurrencyNumber = document.getElementById('concurrencyNumber');
 const concurrencyValue = document.getElementById('concurrencyValue');
+const modelConcurrencyRange = document.getElementById('modelConcurrencyRange');
+const modelConcurrencyNumber = document.getElementById('modelConcurrencyNumber');
+const modelConcurrencyValue = document.getElementById('modelConcurrencyValue');
 
 const logoutBtn = document.getElementById('logoutBtn');
 const leaderboardToggle = document.getElementById('leaderboardToggle');
@@ -93,6 +96,34 @@ concurrencyNumber.addEventListener('input', () => setConcurrency(concurrencyNumb
     if (stored) saved = clampConcurrency(stored);
   } catch (e) {}
   setConcurrency(saved);
+})();
+
+// ---------- Model concurrency control (每个主机内并发测试几个模型) ----------
+
+function clampModelConcurrency(v) {
+  v = parseInt(v, 10);
+  if (isNaN(v)) v = 4;
+  return Math.min(20, Math.max(1, v));
+}
+
+function setModelConcurrency(v) {
+  v = clampModelConcurrency(v);
+  modelConcurrencyRange.value = v;
+  modelConcurrencyNumber.value = v;
+  modelConcurrencyValue.textContent = v;
+  try { localStorage.setItem('ollama-scanner-model-concurrency', String(v)); } catch (e) {}
+}
+
+modelConcurrencyRange.addEventListener('input', () => setModelConcurrency(modelConcurrencyRange.value));
+modelConcurrencyNumber.addEventListener('input', () => setModelConcurrency(modelConcurrencyNumber.value));
+
+(function initModelConcurrency() {
+  let saved = 4;
+  try {
+    const stored = localStorage.getItem('ollama-scanner-model-concurrency');
+    if (stored) saved = clampModelConcurrency(stored);
+  } catch (e) {}
+  setModelConcurrency(saved);
 })();
 
 // ---------- Hosts ----------
@@ -177,10 +208,11 @@ hostForm.addEventListener('submit', (e) => {
 
 async function startScan() {
   const concurrency = clampConcurrency(concurrencyNumber.value);
+  const model_concurrency = clampModelConcurrency(modelConcurrencyNumber.value);
   const res = await apiFetch('/api/scan/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ concurrency }),
+    body: JSON.stringify({ concurrency, model_concurrency }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -207,6 +239,8 @@ function setRunningUI(running) {
   stopBtn.disabled = !running;
   concurrencyRange.disabled = running;
   concurrencyNumber.disabled = running;
+  modelConcurrencyRange.disabled = running;
+  modelConcurrencyNumber.disabled = running;
   radar.classList.toggle('is-active', running);
   if (running) setStatusPill('running', '扫描中…');
 }
