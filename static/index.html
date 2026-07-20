@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Ollama 集群扫描台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="scanline-overlay" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <div class="topbar__id">
+      <span class="eyebrow">OLLAMA / FLEET SCAN</span>
+      <h1>集群扫描台</h1>
+    </div>
+    <div class="topbar__actions">
+      <button id="leaderboardToggle" class="btn btn--add">🏆 排行榜</button>
+      <button id="logoutBtn" class="btn" title="退出登录">⎋ 退出</button>
+    </div>
+    <div class="radar" id="radar" aria-hidden="true">
+      <div class="radar__ring radar__ring--1"></div>
+      <div class="radar__ring radar__ring--2"></div>
+      <div class="radar__sweep" id="radarSweep"></div>
+      <div class="radar__core"></div>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 主机管理面板 -->
+    <section class="panel panel--hosts" aria-labelledby="hostsTitle">
+      <h2 id="hostsTitle" class="panel__title">
+        <span class="panel__index">01</span> 主机地址
+      </h2>
+      <p class="panel__hint">添加任意数量的 Ollama 服务地址，例如 <code>http://192.168.1.10:11434</code>。星标收藏常用地址，关闭开关可临时排除某个地址（不删除，也不参与扫描）。</p>
+
+      <form id="hostForm" class="host-form">
+        <input
+          type="text"
+          id="hostInput"
+          class="host-form__input"
+          placeholder="http://host:11434 或 host:11434"
+          autocomplete="off"
+          spellcheck="false"
+        />
+        <button type="submit" class="btn btn--add">+ 添加</button>
+      </form>
+
+      <ul id="hostList" class="host-list" aria-live="polite">
+        <!-- 动态渲染 -->
+      </ul>
+      <p id="hostEmpty" class="host-empty">还没有添加任何主机地址。</p>
+    </section>
+
+    <!-- 控制与日志 -->
+    <section class="panel panel--console" aria-labelledby="consoleTitle">
+      <div class="console-head">
+        <h2 id="consoleTitle" class="panel__title">
+          <span class="panel__index">02</span> 扫描控制台
+        </h2>
+        <div class="controls">
+          <span id="statusPill" class="status-pill status-pill--idle">待机</span>
+          <button id="startBtn" class="btn btn--start">▶ 开始扫描</button>
+          <button id="stopBtn" class="btn btn--stop" disabled>■ 停止</button>
+        </div>
+      </div>
+
+      <div class="concurrency">
+        <label for="concurrencyRange" class="concurrency__label">
+          主机并发数 <span id="concurrencyValue" class="concurrency__value">3</span>
+          <span class="concurrency__hint">— 同时运行的主机数量，每个主机不会被重复运行</span>
+        </label>
+        <div class="concurrency__row">
+          <input type="range" id="concurrencyRange" min="1" max="100" value="3" />
+          <input type="number" id="concurrencyNumber" min="1" max="100" value="3" class="concurrency__number" />
+        </div>
+      </div>
+
+      <div class="concurrency">
+        <label for="modelConcurrencyRange" class="concurrency__label">
+          单主机内模型并发数 <span id="modelConcurrencyValue" class="concurrency__value">4</span>
+          <span class="concurrency__hint">— 同一主机内同时测试几个模型；目标主机若只有单卡/单模型槽位，调太高不一定更快，反而可能超时增多</span>
+        </label>
+        <div class="concurrency__row">
+          <input type="range" id="modelConcurrencyRange" min="1" max="20" value="4" />
+          <input type="number" id="modelConcurrencyNumber" min="1" max="20" value="4" class="concurrency__number" />
+        </div>
+      </div>
+
+      <div id="log" class="log" role="log" aria-live="polite"></div>
+    </section>
+
+    <!-- 结果面板 -->
+    <section class="panel panel--results" aria-labelledby="resultsTitle">
+      <h2 id="resultsTitle" class="panel__title">
+        <span class="panel__index">03</span> 测试结果
+      </h2>
+      <div id="resultsBody" class="results-body">
+        <p class="results-empty">暂无结果，运行一次扫描后将显示各模型的测试通过情况。</p>
+      </div>
+    </section>
+
+    <!-- 排行榜（含左侧连通性侧边栏） -->
+    <section class="panel panel--leaderboard" id="leaderboardPanel" aria-labelledby="leaderboardTitle" hidden>
+      <div class="console-head">
+        <h2 id="leaderboardTitle" class="panel__title">
+          <span class="panel__index">04</span> 排行榜
+        </h2>
+        <button id="leaderboardRefresh" class="btn btn--add">↻ 刷新</button>
+      </div>
+      <p class="panel__hint">
+        三个维度分开排名：<strong>核心测试</strong>考代码正确性与速度；<strong>控制性</strong>用标准
+        tool-calling 协议（同 Hermes Agent / OpenClaw 驱动模型的方式）验证模型是否真的调用工具完成了文件读写，
+        而不是嘴上说说；<strong>语言性</strong>考纯文本输出是否严格符合格式/字数/关键词等客观要求。
+        每个维度内只有全部通过才参与排名（按总耗时升序），有失败项的只额外记录。
+      </p>
+
+      <div class="lb-tabs" role="tablist">
+        <button type="button" class="lb-tab is-active" data-cat="core" role="tab">核心测试</button>
+        <button type="button" class="lb-tab" data-cat="control" role="tab">控制性 (Agent工具调用)</button>
+        <button type="button" class="lb-tab" data-cat="language" role="tab">语言性</button>
+      </div>
+
+      <div class="leaderboard-layout">
+        <!-- 左侧：已添加链接 + 每个模型的连通性状态 -->
+        <aside class="lb-sidebar" aria-label="链接与模型连通性">
+          <h3 class="lb-sidebar__title">已添加链接</h3>
+          <ul id="lbHostList" class="lb-host-list"></ul>
+          <p id="lbHostEmpty" class="host-empty">还没有已添加的主机地址。</p>
+
+          <div id="lbModelPanel" class="lb-model-panel" hidden>
+            <div class="lb-model-panel__head">
+              <span id="lbModelHostLabel" class="lb-model-panel__host"></span>
+            </div>
+            <ul id="lbModelList" class="lb-model-list"></ul>
+            <p id="lbModelEmpty" class="host-empty">该主机尚无已发现的模型，先运行一次扫描。</p>
+          </div>
+        </aside>
+
+        <!-- 右侧：排行榜表格 -->
+        <div class="lb-main">
+          <div class="lb-section">
+            <h3 id="lbRankedTitle" class="lb-section__title">排行榜（全部通过）</h3>
+            <div id="lbRanked" class="lb-table">
+              <p class="results-empty">暂无排名数据。</p>
+            </div>
+          </div>
+          <div class="lb-section">
+            <h3 class="lb-section__title">失败记录（不参与排名）</h3>
+            <div id="lbFailed" class="lb-table">
+              <p class="results-empty">暂无失败记录。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>阶段：发现模型 → 可用性测试 → 高级代码测试(核心/控制性/语言性)</span>
+    <span class="footer__note">参考系列标注为本地静态模糊匹配，非实时联网比对，也不代表验证过标签真实性——Ollama 模型标签可被任意自定义命名，请自行核实来源。</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
