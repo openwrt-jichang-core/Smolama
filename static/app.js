@@ -226,7 +226,9 @@ batchCancelBtn.addEventListener('click', () => {
 
 // Matches ip[:port], with or without a leading http(s)://
 const IP_PORT_RE = /(?:https?:\/\/)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/g;
-const DEFAULT_PORT = '11434';
+// Matches domain[:port], with or without a leading http(s)://
+// 要求至少两段（有一个点），且最后一段（TLD）包含字母，用来排除纯数字的 IPv4 被这条正则重复捕获
+const DOMAIN_PORT_RE = /(?:https?:\/\/)?([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)(?::(\d{1,5}))?/g;
 
 function isPrivateIp(ip) {
   const parts = ip.split('.').map(Number);
@@ -244,22 +246,38 @@ function parseAddresses(text) {
   const seen = new Set();
   const results = [];
   let match;
+
+  // 1) IPv4[:port] —— 端口缺省时不补全，留空
   IP_PORT_RE.lastIndex = 0;
   while ((match = IP_PORT_RE.exec(text)) !== null) {
     const ip = match[1];
-    const port = match[2] || DEFAULT_PORT;
-    const url = `http://${ip}:${port}`;
+    const port = match[2] || '';
+    const url = port ? `http://${ip}:${port}` : `http://${ip}`;
     if (seen.has(url)) continue;
     seen.add(url);
-    results.push({ url, ip, private: isPrivateIp(ip) });
+    results.push({ url, host: ip, port, private: isPrivateIp(ip), type: 'ip' });
   }
+
+  // 2) 域名[:port] —— 端口缺省同样不补全；协议统一用 http，不按端口猜 https（避免没配证书时打不开）
+  DOMAIN_PORT_RE.lastIndex = 0;
+  while ((match = DOMAIN_PORT_RE.exec(text)) !== null) {
+    const domain = match[1];
+    const port = match[2] || '';
+    const lastLabel = domain.slice(domain.lastIndexOf('.') + 1);
+    if (!/[a-zA-Z]/.test(lastLabel)) continue; // 纯数字结尾，多半是已被上面 IP 正则捕获过的 IPv4
+    const url = port ? `http://${domain}:${port}` : `http://${domain}`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    results.push({ url, host: domain, port, private: false, type: 'domain' });
+  }
+
   return results;
 }
 
 batchParseBtn.addEventListener('click', async () => {
   const parsed = parseAddresses(batchInput.value);
   if (!parsed.length) {
-    batchPreview.innerHTML = '<li>没有识别到任何 ip:port 地址。</li>';
+    batchPreview.innerHTML = '<li>没有识别到任何 ip[:port] 或 域名[:port] 地址。</li>';
     return;
   }
 
@@ -279,7 +297,13 @@ batchParseBtn.addEventListener('click', async () => {
 
   const toAdd = [...privateOnes, ...(publicOnes.length ? publicOnes : [])];
   batchPreview.innerHTML = toAdd
-    .map((p) => `<li><span class="${p.private ? 'tag-private' : 'tag-public'}">${p.private ? '内网' : '公网'}</span> ${escapeHtml(p.url)}</li>`)
+    .map((p) => {
+      const kindTag = p.private
+        ? '<span class="tag-private">内网</span>'
+        : `<span class="tag-public">${p.type === 'domain' ? '域名' : '公网'}</span>`;
+      const portTag = p.port ? '' : ' <span class="tag-noport">(未指定端口)</span>';
+      return `<li>${kindTag} ${escapeHtml(p.url)}${portTag}</li>`;
+    })
     .join('');
 
   for (const p of toAdd) {
