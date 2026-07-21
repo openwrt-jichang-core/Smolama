@@ -204,6 +204,93 @@ hostForm.addEventListener('submit', (e) => {
   hostInput.value = '';
 });
 
+// ---------- Batch paste parsing ----------
+
+const batchToggle = document.getElementById('batchToggle');
+const batchPanel = document.getElementById('batchPanel');
+const batchInput = document.getElementById('batchInput');
+const batchParseBtn = document.getElementById('batchParseBtn');
+const batchCancelBtn = document.getElementById('batchCancelBtn');
+const batchPreview = document.getElementById('batchPreview');
+
+batchToggle.addEventListener('click', () => {
+  const showing = !batchPanel.hidden;
+  batchPanel.hidden = showing;
+  if (!showing) batchInput.focus();
+});
+batchCancelBtn.addEventListener('click', () => {
+  batchPanel.hidden = true;
+  batchInput.value = '';
+  batchPreview.innerHTML = '';
+});
+
+// Matches ip[:port], with or without a leading http(s)://
+const IP_PORT_RE = /(?:https?:\/\/)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?/g;
+const DEFAULT_PORT = '11434';
+
+function isPrivateIp(ip) {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
+  const [a, b] = parts;
+  if (a === 10) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 127) return true; // loopback
+  if (a === 169 && b === 254) return true; // link-local
+  return false;
+}
+
+function parseAddresses(text) {
+  const seen = new Set();
+  const results = [];
+  let match;
+  IP_PORT_RE.lastIndex = 0;
+  while ((match = IP_PORT_RE.exec(text)) !== null) {
+    const ip = match[1];
+    const port = match[2] || DEFAULT_PORT;
+    const url = `http://${ip}:${port}`;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    results.push({ url, ip, private: isPrivateIp(ip) });
+  }
+  return results;
+}
+
+batchParseBtn.addEventListener('click', async () => {
+  const parsed = parseAddresses(batchInput.value);
+  if (!parsed.length) {
+    batchPreview.innerHTML = '<li>没有识别到任何 ip:port 地址。</li>';
+    return;
+  }
+
+  const privateOnes = parsed.filter((p) => p.private);
+  const publicOnes = parsed.filter((p) => !p.private);
+
+  if (publicOnes.length) {
+    const list = publicOnes.map((p) => `  • ${p.url}`).join('\n');
+    const confirmed = confirm(
+      `以下 ${publicOnes.length} 个地址不属于内网网段（10.x / 172.16-31.x / 192.168.x）：\n\n${list}\n\n` +
+      `请确认这些都是你自己拥有或已获得明确授权测试的主机，再继续添加。\n点击"确定"添加全部，"取消"仅添加内网地址。`
+    );
+    if (!confirmed) {
+      publicOnes.length = 0; // drop them, keep only private
+    }
+  }
+
+  const toAdd = [...privateOnes, ...(publicOnes.length ? publicOnes : [])];
+  batchPreview.innerHTML = toAdd
+    .map((p) => `<li><span class="${p.private ? 'tag-private' : 'tag-public'}">${p.private ? '内网' : '公网'}</span> ${escapeHtml(p.url)}</li>`)
+    .join('');
+
+  for (const p of toAdd) {
+    await addHost(p.url);
+  }
+
+  if (toAdd.length) {
+    batchInput.value = '';
+  }
+});
+
 // ---------- Scan control ----------
 
 async function startScan() {

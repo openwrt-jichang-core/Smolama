@@ -233,6 +233,64 @@ code {
   box-shadow: 0 0 0 3px rgba(45,212,191,0.15);
 }
 
+.batch-panel {
+  background: var(--panel-raised);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.batch-panel__textarea {
+  width: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  outline: none;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.batch-panel__textarea:focus {
+  border-color: var(--signal);
+  box-shadow: 0 0 0 3px rgba(45,212,191,0.15);
+}
+
+.batch-panel__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.batch-panel__preview {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.batch-panel__preview li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.batch-panel__preview .tag-private {
+  color: var(--signal);
+}
+
+.batch-panel__preview .tag-public {
+  color: #f59e0b;
+}
+
 .btn {
   font-family: var(--font-mono);
   font-size: 13px;

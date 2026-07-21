@@ -46,7 +46,18 @@
           spellcheck="false"
         />
         <button type="submit" class="btn btn--add">+ 添加</button>
+        <button type="button" id="batchToggle" class="btn" title="从一段文本里批量识别多个地址">批量粘贴</button>
       </form>
+
+      <div id="batchPanel" class="batch-panel" hidden>
+        <p class="panel__hint">粘贴含有多个地址的文本，会自动提取 <code>ip:port</code>（没写端口默认按 11434）。仅限你自己的内网/授权主机——非内网（非 10.x / 172.16-31.x / 192.168.x）地址会先弹出确认，不会静默加入。</p>
+        <textarea id="batchInput" class="batch-panel__textarea" rows="6" placeholder="把整段文本粘贴到这里…"></textarea>
+        <div class="batch-panel__actions">
+          <button type="button" id="batchParseBtn" class="btn btn--add">解析并添加</button>
+          <button type="button" id="batchCancelBtn" class="btn">取消</button>
+        </div>
+        <ul id="batchPreview" class="batch-panel__preview"></ul>
+      </div>
 
       <ul id="hostList" class="host-list" aria-live="polite">
         <!-- 动态渲染 -->
