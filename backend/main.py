@@ -598,15 +598,5 @@ def ping_model(body: PingIn, auth=Depends(require_auth)):
 # 静态资源（login.html 不需要鉴权；index.html 走上面的 "/" 路由做了鉴权拦截）
 # ---------------------------------------------------------------------------
 
-class NoCacheStaticFiles(StaticFiles):
-    """静态文件不做浏览器强缓存，每次都向服务器确认版本，
-    避免重新部署后手机/浏览器还在用旧的 app.js / style.css。"""
-
-    def file_response(self, *args, **kwargs):
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
-        return response
-
-
 static_dir = Path(__file__).parent.parent / "static"
-app.mount("/", NoCacheStaticFiles(directory=str(static_dir), html=True), name="static")
+app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
