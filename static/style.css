@@ -291,11 +291,6 @@ code {
   color: #f59e0b;
 }
 
-.batch-panel__preview .tag-noport {
-  color: var(--dim);
-  font-style: italic;
-}
-
 .btn {
   font-family: var(--font-mono);
   font-size: 13px;
