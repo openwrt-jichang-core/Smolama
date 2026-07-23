@@ -313,6 +313,88 @@ def _check_numbered_list(response, *_):
     return True, None
 
 
+def _check_generic_rules(response, rules):
+    """给用户自定义"语言性测试用例"用的通用规则校验器。rules 是一个规则列表，
+    全部通过才算 PASS。只做纯文本规则判定，不执行任何代码，风险和内置的语言性测试一致。
+    支持的规则类型：
+      - {"type": "exact_han_count", "n": 20}          恰好 n 个汉字
+      - {"type": "keyword_count", "word": "备份", "count": 3}   某词恰好出现 count 次
+      - {"type": "forbidden_words", "words": ["删除"]}          不能出现这些词
+      - {"type": "numbered_list_count", "n": 5}        恰好 n 条 "数字. " 开头的编号行
+      - {"type": "max_length", "n": 200}                回复长度不超过 n 个字符
+    """
+    text = response or ""
+    for rule in rules or []:
+        rtype = rule.get("type")
+        if rtype == "exact_han_count":
+            count = len(re.findall(r"[\u4e00-\u9fff]", text))
+            if count != rule.get("n", 0):
+                return False, f"汉字数={count}（要求恰好{rule.get('n', 0)}个）"
+        elif rtype == "keyword_count":
+            word = rule.get("word", "")
+            actual = text.count(word) if word else 0
+            if actual != rule.get("count", 0):
+                return False, f"“{word}”出现了{actual}次（要求恰好{rule.get('count', 0)}次）"
+        elif rtype == "forbidden_words":
+            for w in rule.get("words", []):
+                if w and w in text:
+                    return False, f"出现了禁用词“{w}”"
+        elif rtype == "numbered_list_count":
+            lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+            numbered = []
+            for l in lines:
+                m = re.match(r"^(\d+)[\.\、]\s*(.+)$", l)
+                if m:
+                    numbered.append(int(m.group(1)))
+            n = rule.get("n", 0)
+            if len(numbered) != n or numbered != list(range(1, n + 1)):
+                return False, f"编号行不符合要求(实际{len(numbered)}条，要求{n}条且从1开始连续编号)"
+        elif rtype == "max_length":
+            if len(text) > rule.get("n", 10**9):
+                return False, f"长度{len(text)}超过上限{rule.get('n')}"
+    return True, None
+
+
+def build_custom_language_case(defn: dict):
+    """把一条用户自定义定义({"name","prompt","rules":[...]})转换成内部测试用例格式。"""
+    rules = defn.get("rules", [])
+    return {
+        "name": f"[自定义] {defn.get('name', '未命名用例')}",
+        "category": "language",
+        "kind": "language",
+        "prompt": defn.get("prompt", ""),
+        "checker": lambda response, *_: _check_generic_rules(response, rules),
+    }
+
+
+# 运行时可由 main.py 根据设置里的自定义用例刷新，不需要重启进程。
+CUSTOM_LANGUAGE_TEST_CASES = []
+CUSTOM_CORE_TEST_CASES = []
+
+
+def refresh_custom_language_cases(defs: list):
+    global CUSTOM_LANGUAGE_TEST_CASES
+    CUSTOM_LANGUAGE_TEST_CASES = [build_custom_language_case(d) for d in (defs or []) if d.get("prompt")]
+
+
+def refresh_custom_core_cases(defs: list):
+    """自定义"核心测试"：和内置 core 用例一样，会把 harness 拼到模型生成的代码后面，
+    在沙箱子进程里执行。这是执行任意代码，因此新增时要求二次输入密码确认(见 main.py)，
+    这里只负责把已经通过密码校验、存进设置里的定义转换成可执行的用例格式。"""
+    global CUSTOM_CORE_TEST_CASES
+    CUSTOM_CORE_TEST_CASES = [
+        {
+            "name": f"[自定义] {d.get('name', '未命名用例')}",
+            "category": "core",
+            "kind": "core",
+            "prompt": d.get("prompt", ""),
+            "harness": d.get("harness", ""),
+            "expected": d.get("expected", "ALL_PASS"),
+        }
+        for d in (defs or []) if d.get("prompt") and d.get("harness")
+    ]
+
+
 LANGUAGE_TEST_CASES = [
     {
         "name": "严格字数约束摘要",
@@ -570,7 +652,14 @@ class ScanState:
 
     def get_logs_since(self, since):
         with self.lock:
-            return [l for l in self.logs if l["seq"] > since]
+            # seq 从 1 开始严格自增、只会追加不会被删除（除非整体 reset），
+            # 因此 logs[i]["seq"] == i + 1 恒成立，可以直接切片取增量，
+            # 不必再对全量日志做一次线性过滤（避免长时间扫描后 O(n^2) 的轮询开销）。
+            if since <= 0:
+                return list(self.logs)
+            if since >= self._seq:
+                return []
+            return self.logs[since:]
 
     def reset(self):
         with self.lock:
@@ -600,29 +689,56 @@ class ScanState:
             self.active_hosts.discard(host)
 
 
+TRANSIENT_RETRY_COUNT = 1       # 网络抖动类错误(连接失败/超时)重试这么多次(不含首次请求)
+TRANSIENT_RETRY_DELAY = 1.5     # 每次重试前的等待秒数
+
+
+def _is_transient_error(e: Exception) -> bool:
+    return isinstance(e, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+
+
 def discover_models(host):
-    try:
-        resp = requests.get(f"{host}/api/tags", timeout=10)
-        data = resp.json()
-        models = [m["name"] for m in data.get("models", [])]
-        return models, None
-    except Exception as e:
-        return [], str(e)
+    last_err = None
+    for attempt in range(TRANSIENT_RETRY_COUNT + 1):
+        try:
+            resp = requests.get(f"{host}/api/tags", timeout=10)
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+            return models, None
+        except Exception as e:
+            last_err = e
+            if attempt < TRANSIENT_RETRY_COUNT and _is_transient_error(e):
+                time.sleep(TRANSIENT_RETRY_DELAY)
+                continue
+            break
+    return [], str(last_err)
 
 
 def quick_test(host, model):
-    try:
-        resp = requests.post(
-            f"{host}/api/generate",
-            json={"model": model, "prompt": "say ok", "stream": False},
-            timeout=QUICK_TEST_TIMEOUT,
-        )
-        data = resp.json()
-        if "error" in data:
-            return False, data["error"]
-        return True, None
-    except Exception as e:
-        return False, str(e)
+    """返回 (ok, err, elapsed_seconds)。elapsed 是本次(最后一次尝试)请求耗时，用于"快速测试"排行榜排序。"""
+    last_err = None
+    elapsed = None
+    for attempt in range(TRANSIENT_RETRY_COUNT + 1):
+        start = time.time()
+        try:
+            resp = requests.post(
+                f"{host}/api/generate",
+                json={"model": model, "prompt": "say ok", "stream": False},
+                timeout=QUICK_TEST_TIMEOUT,
+            )
+            elapsed = round(time.time() - start, 2)
+            data = resp.json()
+            if "error" in data:
+                return False, data["error"], elapsed  # 应用层错误(比如模型不存在)不是网络抖动，不重试
+            return True, None, elapsed
+        except Exception as e:
+            last_err = e
+            elapsed = round(time.time() - start, 2)
+            if attempt < TRANSIENT_RETRY_COUNT and _is_transient_error(e):
+                time.sleep(TRANSIENT_RETRY_DELAY)
+                continue
+            break
+    return False, str(last_err), elapsed
 
 
 def extract_code(text):
@@ -781,7 +897,7 @@ def process_host(host, state: ScanState, model_concurrency=4):
     import concurrent.futures
 
     tag = f"[{host}]"
-    host_result = {"models": [], "viability": {}, "advanced": {}}
+    host_result = {"models": [], "viability": {}, "viability_timing": {}, "advanced": {}}
 
     if state.is_stopping():
         return host_result
@@ -802,17 +918,20 @@ def process_host(host, state: ScanState, model_concurrency=4):
 
     # ---- 阶段一: 可用性测试, 同一主机内并发跑多个模型 ----
     viable = {}
+    timing = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(quick_test, host, model): model for model in models}
         for future in concurrent.futures.as_completed(futures):
             model = futures[future]
             try:
-                ok, verr = future.result()
+                ok, verr, elapsed = future.result()
             except Exception as e:
-                ok, verr = False, str(e)
+                ok, verr, elapsed = False, str(e), None
             viable[model] = ok
+            timing[model] = elapsed
             state.log(f"{tag} {model}: {'可用' if ok else '不可用 - ' + str(verr)[:80]}")
     host_result["viability"] = viable
+    host_result["viability_timing"] = timing
 
     if state.is_stopping():
         return host_result
@@ -847,7 +966,7 @@ def run_advanced_tests(host, model, state, tag=""):
     返回结果列表, 每项为 (name, category, status, detail, elapsed) 五元组。
     """
     results = []
-    for case in ALL_TEST_CASES:
+    for case in ALL_TEST_CASES + CUSTOM_LANGUAGE_TEST_CASES + CUSTOM_CORE_TEST_CASES:
         if state.is_stopping():
             state.log(f"{tag} 已收到停止信号, 中断高级测试")
             break
@@ -959,12 +1078,25 @@ def run_scan(hosts, state: ScanState, concurrency=3, model_concurrency=4):
 
         discovered = {h: r["models"] for h, r in all_results.items() if r.get("models")}
         viability = {}
+        viability_timing = {}
         advanced = {}
         for h, r in all_results.items():
             for m, ok in r.get("viability", {}).items():
                 viability[f"{h}|{m}"] = ok
+            for m, t in r.get("viability_timing", {}).items():
+                viability_timing[f"{h}|{m}"] = t
             for m, tests in r.get("advanced", {}).items():
                 advanced[f"{h}|{m}"] = tests
+
+        # 每台主机的整体状态：discover 都没成功 -> unreachable；发现了模型但全部连不上 -> all_down；否则 ok
+        host_status = {}
+        for h in hosts:
+            models = discovered.get(h)
+            if not models:
+                host_status[h] = "unreachable"
+                continue
+            vals = [viability.get(f"{h}|{m}") for m in models]
+            host_status[h] = "all_down" if vals and all(v is False for v in vals) else "ok"
 
         # 按三个维度(core/control/language)分别统计通过情况用于摘要日志
         category_labels = {"core": "核心测试", "control": "控制性(Agent工具调用)", "language": "语言性"}
@@ -1001,6 +1133,8 @@ def run_scan(hosts, state: ScanState, concurrency=3, model_concurrency=4):
         state.results = {
             "discovered": discovered,
             "viability": viability,
+            "viability_timing": viability_timing,
+            "host_status": host_status,
             "advanced": {
                 key: [
                     {

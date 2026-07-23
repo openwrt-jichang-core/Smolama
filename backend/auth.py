@@ -4,11 +4,13 @@
 - 登录失败按 IP 计数，达到阈值后触发指数退避锁定（3 次内不锁，之后 2^(fails-3) 分钟，上限 60 分钟）
 - 会话为服务端随机 token，通过 HttpOnly / SameSite=Strict Cookie 下发，内存持有 + 定期落盘防止重启后全部失效
 """
+import base64
 import hashlib
 import hmac
 import json
 import os
 import secrets
+import struct
 import time
 from pathlib import Path
 
@@ -16,6 +18,9 @@ PBKDF2_ITERATIONS = 200_000
 SESSION_TTL_SECONDS = 12 * 3600  # 会话有效期 12 小时
 LOCK_FREE_ATTEMPTS = 3           # 前 3 次失败不锁定
 LOCK_MAX_MINUTES = 60            # 单次锁定时长上限
+TOTP_STEP_SECONDS = 30
+TOTP_DIGITS = 6
+TOTP_WINDOW = 1  # 允许前后各 1 个时间步的时钟误差
 
 
 class AuthManager:
@@ -64,6 +69,79 @@ class AuthManager:
     def verify_password(self, pw: str) -> bool:
         data = self._load_json(self.auth_file, {})
         return self._verify_hash(pw, data.get("salt", ""), data.get("hash", ""))
+
+    # ---------------- TOTP 两步验证 ----------------
+    # 密钥以 Base32 明文存放在 auth.json 里(和 ADMIN_PASSWORD 同一信任模型：
+    # 容器本身已经通过密码鉴权 + HTTPS 反代保护)。校验通过标准 RFC 6238 算法，
+    # 允许前后各 1 个时间步(±30s)的时钟误差，并记录最近一次成功使用的时间步防止同一验证码被重放。
+
+    def is_totp_enabled(self) -> bool:
+        data = self._load_json(self.auth_file, {})
+        return bool(data.get("totp_secret") and data.get("totp_enabled"))
+
+    def generate_totp_secret(self) -> str:
+        """生成一个新的 Base32 密钥，暂存但不启用，等待用户输入一次验证码确认后再 enable_totp。"""
+        secret = base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+        data = self._load_json(self.auth_file, {})
+        data["totp_pending_secret"] = secret
+        data["totp_enabled"] = data.get("totp_enabled", False)
+        self._save_json(self.auth_file, data)
+        return secret
+
+    def enable_totp(self, code: str) -> bool:
+        """用刚生成的 pending secret 校验一次验证码，通过后才正式启用。"""
+        data = self._load_json(self.auth_file, {})
+        pending = data.get("totp_pending_secret")
+        if not pending or not self._totp_verify_code(pending, code):
+            return False
+        data["totp_secret"] = pending
+        data["totp_enabled"] = True
+        data.pop("totp_pending_secret", None)
+        data.pop("totp_last_step", None)
+        self._save_json(self.auth_file, data)
+        return True
+
+    def disable_totp(self):
+        data = self._load_json(self.auth_file, {})
+        data.pop("totp_secret", None)
+        data.pop("totp_pending_secret", None)
+        data.pop("totp_last_step", None)
+        data["totp_enabled"] = False
+        self._save_json(self.auth_file, data)
+
+    def verify_totp(self, code: str) -> bool:
+        data = self._load_json(self.auth_file, {})
+        if not data.get("totp_enabled") or not data.get("totp_secret"):
+            return False
+        secret = data["totp_secret"]
+        ok, step = self._totp_verify_code(secret, code, return_step=True)
+        if not ok:
+            return False
+        if step is not None and step == data.get("totp_last_step"):
+            return False  # 同一个验证码在同一时间步内不能被重复使用(防重放)
+        data["totp_last_step"] = step
+        self._save_json(self.auth_file, data)
+        return True
+
+    @staticmethod
+    def _totp_code_for_step(secret: str, step: int) -> str:
+        key = base64.b32decode(secret.upper() + "=" * ((8 - len(secret) % 8) % 8))
+        msg = struct.pack(">Q", step)
+        h = hmac.new(key, msg, hashlib.sha1).digest()
+        offset = h[-1] & 0x0F
+        code_int = (struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF) % (10 ** TOTP_DIGITS)
+        return str(code_int).zfill(TOTP_DIGITS)
+
+    def _totp_verify_code(self, secret: str, code: str, return_step: bool = False):
+        code = (code or "").strip()
+        if not code.isdigit() or len(code) != TOTP_DIGITS:
+            return (False, None) if return_step else False
+        now_step = int(time.time() // TOTP_STEP_SECONDS)
+        for delta in range(-TOTP_WINDOW, TOTP_WINDOW + 1):
+            step = now_step + delta
+            if hmac.compare_digest(self._totp_code_for_step(secret, step), code):
+                return (True, step) if return_step else True
+        return (False, None) if return_step else False
 
     # ---------------- 登录失败锁定（防爆破） ----------------
 
@@ -136,6 +214,8 @@ class AuthManager:
     @staticmethod
     def _save_json(path: Path, data):
         try:
-            path.write_text(json.dumps(data, ensure_ascii=False))
+            tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{secrets.token_hex(4)}")
+            tmp.write_text(json.dumps(data, ensure_ascii=False))
+            os.replace(tmp, path)
         except Exception:
             pass
