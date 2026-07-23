@@ -20,6 +20,10 @@ VOLUME ["/data"]
 
 EXPOSE 8000
 
+# /api/session 无需鉴权即可访问且响应很轻，适合当健康检查探针
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/session', timeout=3)" || exit 1
+
 USER scanner
 WORKDIR /app/backend
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
