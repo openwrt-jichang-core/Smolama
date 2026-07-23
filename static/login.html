@@ -26,6 +26,16 @@
         autofocus
       />
 
+      <input
+        type="text"
+        id="loginTotp"
+        class="login-input"
+        placeholder="两步验证码（6位数字）"
+        autocomplete="one-time-code"
+        inputmode="numeric"
+        style="display:none;"
+      />
+
       <button type="submit" id="loginSubmit" class="btn btn--start login-submit">登录</button>
 
       <p id="loginError" class="login-error" role="alert" aria-live="assertive"></p>

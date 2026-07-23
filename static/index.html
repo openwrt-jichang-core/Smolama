@@ -18,6 +18,9 @@
     </div>
     <div class="topbar__actions">
       <button id="leaderboardToggle" class="btn btn--add">🏆 排行榜</button>
+      <button id="auditToggle" class="btn" title="查看最近的操作记录">📜 审计日志</button>
+      <button id="settingsToggle" class="btn" title="定时扫描与异常通知设置">⚙️ 设置</button>
+      <button id="themeToggle" class="btn theme-toggle" title="切换深色/浅色主题">🌗 主题</button>
       <button id="logoutBtn" class="btn" title="退出登录">⎋ 退出</button>
     </div>
     <div class="radar" id="radar" aria-hidden="true">
@@ -34,7 +37,11 @@
       <h2 id="hostsTitle" class="panel__title">
         <span class="panel__index">01</span> 主机地址
       </h2>
-      <p class="panel__hint">添加任意数量的 Ollama 服务地址，例如 <code>http://192.168.1.10:11434</code>。星标收藏常用地址，关闭开关可临时排除某个地址（不删除，也不参与扫描）。</p>
+      <p class="panel__hint">添加任意数量的 Ollama 服务地址，例如 <code>http://192.168.1.10:11434</code>。星标收藏常用地址，关闭开关可临时排除某个地址（不删除，也不参与扫描）。点击 🏷 可以给主机打标签（比如机房/账号分组），下方输入框按标签筛选。</p>
+
+      <div class="host-filter">
+        <input type="text" id="hostTagFilter" class="host-form__input" placeholder="按标签筛选，例如：机房A（留空显示全部）" autocomplete="off" />
+      </div>
 
       <form id="hostForm" class="host-form">
         <input
@@ -63,6 +70,14 @@
         <!-- 动态渲染 -->
       </ul>
       <p id="hostEmpty" class="host-empty">还没有添加任何主机地址。</p>
+
+      <div id="hostFailedZone" class="host-failed-zone" hidden>
+        <div class="host-failed-zone__head">
+          <h3 class="host-failed-zone__title">⚠️ 失败区（最近一次扫描整链接不通，防止误连误加回来）</h3>
+          <button id="hostFailedDeleteAllBtn" class="btn btn--danger">🗑 一键删除失败链接</button>
+        </div>
+        <ul id="hostFailedList" class="host-list"></ul>
+      </div>
     </section>
 
     <!-- 控制与日志 -->
@@ -120,6 +135,8 @@
           <span class="panel__index">04</span> 排行榜
         </h2>
         <button id="leaderboardRefresh" class="btn btn--add">↻ 刷新</button>
+        <button id="lbExportCsv" class="btn" title="导出为CSV，方便用Excel打开">⇩ 导出CSV</button>
+        <button id="lbExportMd" class="btn" title="导出为Markdown，方便发给别人看">⇩ 导出MD</button>
       </div>
       <p class="panel__hint">
         三个维度分开排名：<strong>核心测试</strong>考代码正确性与速度；<strong>控制性</strong>用标准
@@ -128,10 +145,17 @@
         每个维度内只有全部通过才参与排名（按总耗时升序），有失败项的只额外记录。
       </p>
 
-      <div class="lb-tabs" role="tablist">
-        <button type="button" class="lb-tab is-active" data-cat="core" role="tab">核心测试</button>
-        <button type="button" class="lb-tab" data-cat="control" role="tab">控制性 (Agent工具调用)</button>
-        <button type="button" class="lb-tab" data-cat="language" role="tab">语言性</button>
+      <div class="lb-mode-toggle" role="tablist">
+        <button type="button" class="lb-tab is-active" data-mode="deep" role="tab">🔬 深度测试</button>
+        <button type="button" class="lb-tab" data-mode="quick" role="tab">⚡ 快速测试（仅检测在线/响应速度）</button>
+      </div>
+
+      <div id="lbDeepOnly">
+        <div class="lb-tabs" role="tablist">
+          <button type="button" class="lb-tab is-active" data-cat="core" role="tab">核心测试</button>
+          <button type="button" class="lb-tab" data-cat="control" role="tab">控制性 (Agent工具调用)</button>
+          <button type="button" class="lb-tab" data-cat="language" role="tab">语言性</button>
+        </div>
       </div>
 
       <div class="leaderboard-layout">
@@ -164,7 +188,210 @@
               <p class="results-empty">暂无失败记录。</p>
             </div>
           </div>
+
+          <div class="lb-section" id="lbTrendSection">
+            <h3 class="lb-section__title">历史趋势（当前分类）</h3>
+            <div class="settings-row">
+              <label class="settings-field">时间范围
+                <select id="trendRangeSelect">
+                  <option value="30">最近30天</option>
+                  <option value="90" selected>最近90天</option>
+                  <option value="180">最近180天</option>
+                  <option value="0">全部</option>
+                </select>
+              </label>
+            </div>
+            <div id="trendChart" class="trend-chart">
+              <p class="results-empty">暂无历史趋势数据，跑几次扫描后会自动出现。</p>
+            </div>
+          </div>
         </div>
+      </div>
+    </section>
+
+    <!-- 审计日志 -->
+    <section class="panel panel--audit" id="auditPanel" aria-labelledby="auditTitle" hidden>
+      <div class="console-head">
+        <h2 id="auditTitle" class="panel__title">
+          <span class="panel__index">05</span> 审计日志
+        </h2>
+        <button id="auditRefresh" class="btn btn--add">↻ 刷新</button>
+      </div>
+      <p class="panel__hint">记录谁（来源 IP）在什么时间新增/修改/删除了主机地址，以及登录成功/失败，最多保留最近 1000 条。</p>
+      <div id="auditList" class="audit-list"></div>
+      <p id="auditEmpty" class="host-empty">暂无操作记录。</p>
+    </section>
+
+    <!-- 设置：定时扫描 + 异常通知 -->
+    <section class="panel panel--settings" id="settingsPanel" aria-labelledby="settingsTitle" hidden>
+      <div class="console-head">
+        <h2 id="settingsTitle" class="panel__title">
+          <span class="panel__index">06</span> 设置
+        </h2>
+        <button id="settingsSaveBtn" class="btn btn--add">💾 保存设置</button>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">定时扫描</h3>
+        <p class="panel__hint">开启后，每天固定时间自动跑一次全量扫描（只扫描已启用的主机），跑完会自动和上一次结果做对比，异常会通过下方启用的渠道推送。</p>
+        <div class="settings-row">
+          <label class="settings-checkbox"><input type="checkbox" id="schedEnabled" /> 启用定时扫描</label>
+          <label class="settings-field">时间（每天）
+            <input type="time" id="schedTime" value="09:00" />
+          </label>
+          <label class="settings-field">主机并发数
+            <input type="number" id="schedConcurrency" min="1" max="100" value="3" />
+          </label>
+          <label class="settings-field">单主机模型并发数
+            <input type="number" id="schedModelConcurrency" min="1" max="20" value="4" />
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">异常通知渠道</h3>
+        <p class="panel__hint">可以同时启用多个渠道；发现「之前正常、这次变差」的主机/模型时会全部推送一遍。保存后可以点“发送测试通知”验证配置。</p>
+
+        <div class="settings-channel">
+          <label class="settings-checkbox"><input type="checkbox" id="notifyWecomEnabled" /> 企业微信机器人 Webhook</label>
+          <input type="text" id="notifyWecomUrl" class="settings-input" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..." />
+        </div>
+
+        <div class="settings-channel">
+          <label class="settings-checkbox"><input type="checkbox" id="notifyTelegramEnabled" /> Telegram Bot</label>
+          <input type="text" id="notifyTelegramToken" class="settings-input" placeholder="Bot Token（找 @BotFather 获取）" />
+          <input type="text" id="notifyTelegramChatId" class="settings-input" placeholder="Chat ID" />
+        </div>
+
+        <div class="settings-channel">
+          <label class="settings-checkbox"><input type="checkbox" id="notifyBarkEnabled" /> Bark (iOS)</label>
+          <input type="text" id="notifyBarkKey" class="settings-input" placeholder="Bark Key" />
+          <input type="text" id="notifyBarkServer" class="settings-input" placeholder="Bark 服务器地址（默认 https://api.day.app）" />
+        </div>
+
+        <div class="settings-channel">
+          <label class="settings-checkbox"><input type="checkbox" id="notifyEmailEnabled" /> 邮箱</label>
+          <input type="text" id="notifyEmailHost" class="settings-input" placeholder="SMTP 服务器，例如 smtp.qq.com" />
+          <input type="number" id="notifyEmailPort" class="settings-input" placeholder="端口，例如 587" />
+          <input type="text" id="notifyEmailUser" class="settings-input" placeholder="SMTP 用户名" />
+          <input type="password" id="notifyEmailPass" class="settings-input" placeholder="SMTP 密码/授权码" />
+          <input type="text" id="notifyEmailFrom" class="settings-input" placeholder="发件地址（留空则用用户名）" />
+          <input type="text" id="notifyEmailTo" class="settings-input" placeholder="收件地址" />
+          <label class="settings-checkbox"><input type="checkbox" id="notifyEmailTls" checked /> 使用 STARTTLS</label>
+        </div>
+
+        <button id="notifyTestBtn" class="btn">📨 发送测试通知</button>
+        <span id="settingsStatus" class="settings-status"></span>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">历史趋势数据</h3>
+        <p class="panel__hint">每次扫描完成后会自动追加一条汇总记录（不含主机地址等细节），用于下方的历史趋势图。为防止无限增长占满服务器磁盘，可设置保留天数和文件大小上限，超出的部分会自动从最旧的记录开始清理。</p>
+        <div class="settings-row">
+          <label class="settings-field">保留天数
+            <input type="number" id="histRetentionDays" min="1" value="180" />
+          </label>
+          <label class="settings-field">文件大小上限（MB）
+            <input type="number" id="histMaxSizeMb" min="1" value="50" />
+          </label>
+          <label class="settings-checkbox"><input type="checkbox" id="histAutoCleanup" checked /> 自动清理</label>
+        </div>
+        <div class="settings-row">
+          <span id="histStatsText" class="panel__hint"></span>
+          <button id="histDelete30Btn" class="btn">删除30天前</button>
+          <button id="histDelete60Btn" class="btn">删除60天前</button>
+          <button id="histDelete180Btn" class="btn">删除180天前</button>
+          <button id="histDelete365Btn" class="btn">删除一年前</button>
+          <button id="histDeleteAllBtn" class="btn btn--danger">全部删除</button>
+        </div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">只读分享链接</h3>
+        <p class="panel__hint">开启后可以生成多个无需登录即可访问的只读链接（可各自命名、设置过期时间、单独吊销）。对方只能看到排行榜（主机地址会被替换成"主机1/主机2"这样的匿名编号），看不到真实主机地址、审计日志或任何管理功能。</p>
+        <div class="settings-row">
+          <label class="settings-checkbox"><input type="checkbox" id="shareEnabled" /> 启用分享链接功能</label>
+        </div>
+        <div class="settings-row">
+          <input type="text" id="shareTokenLabel" class="settings-input" placeholder="链接备注（例如：给老王看）" />
+          <label class="settings-field">有效期（天，留空=永久）
+            <input type="number" id="shareTokenExpireDays" min="1" placeholder="永久" />
+          </label>
+          <button id="shareCreateBtn" class="btn btn--add">➕ 生成新链接</button>
+        </div>
+        <div id="shareTokenList" class="share-token-list"></div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">两步验证（TOTP）</h3>
+        <p class="panel__hint">开启后登录时除了密码，还需要输入 Google Authenticator / Authy 等 App 生成的6位验证码，防止密码泄露后被直接登录。</p>
+        <div id="totpStatusText" class="panel__hint">加载中…</div>
+        <div class="settings-row">
+          <button id="totpSetupBtn" class="btn">🔐 开启两步验证</button>
+          <button id="totpDisableBtn" class="btn btn--danger" style="display:none;">关闭两步验证</button>
+        </div>
+        <div id="totpSetupPanel" class="settings-row" style="display:none; flex-direction: column; align-items: flex-start; gap: 8px;">
+          <p class="panel__hint">在 Authenticator App 里手动添加密钥（没有二维码生成功能，需手动输入）：</p>
+          <input type="text" id="totpSecretText" class="settings-input" readonly />
+          <input type="text" id="totpConfirmCode" class="settings-input" placeholder="输入 App 里显示的6位验证码以确认开启" inputmode="numeric" />
+          <button id="totpConfirmBtn" class="btn btn--start">确认开启</button>
+        </div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">Prometheus 指标</h3>
+        <p class="panel__hint">开启后可以用 Prometheus 抓取 <code>/api/metrics</code>（需要带上 token，作为 URL 参数 <code>?token=</code> 或 <code>Authorization: Bearer</code> 头），只暴露主机数量/排行榜聚合数字等指标，不含主机地址。</p>
+        <div class="settings-row">
+          <label class="settings-checkbox"><input type="checkbox" id="metricsEnabled" /> 启用 Prometheus 抓取端点</label>
+          <button id="metricsRegenerateBtn" class="btn">🔄 重新生成 token</button>
+        </div>
+        <input type="text" id="metricsUrlText" class="settings-input" readonly placeholder="启用后完整抓取地址会显示在这里" />
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">自定义语言性测试用例</h3>
+        <p class="panel__hint">追加你自己的"语言性"测试题（纯文本规则判定，不执行任何代码，相对安全）。支持的规则：恰好N个汉字、某词出现次数、禁用词、编号列表条数、最大长度。会在下一次扫描/重测时生效。</p>
+        <div class="settings-row">
+          <input type="text" id="customTestName" class="settings-input" placeholder="用例名称" />
+        </div>
+        <textarea id="customTestPrompt" class="settings-input" rows="2" placeholder="发给模型的提示词（prompt）" style="width:100%; resize: vertical;"></textarea>
+        <div class="settings-row">
+          <select id="customRuleType">
+            <option value="exact_han_count">恰好N个汉字</option>
+            <option value="keyword_count">某词出现次数</option>
+            <option value="forbidden_words">禁用词（逗号分隔）</option>
+            <option value="numbered_list_count">编号列表恰好N条</option>
+            <option value="max_length">最大长度</option>
+          </select>
+          <input type="text" id="customRuleWord" class="settings-input" placeholder="词（仅“某词出现次数”用）" style="display:none;" />
+          <input type="text" id="customRuleWords" class="settings-input" placeholder="禁用词，逗号分隔" style="display:none;" />
+          <input type="number" id="customRuleN" class="settings-input" placeholder="数量N" style="width:100px;" />
+          <button id="customRuleAddBtn" class="btn">➕ 加一条规则</button>
+        </div>
+        <div id="customRuleList" class="panel__hint"></div>
+        <button id="customTestSaveBtn" class="btn btn--add">💾 保存用例</button>
+        <div id="customTestList" class="share-token-list"></div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">自定义核心测试用例 ⚠️ 高风险</h3>
+        <p class="panel__hint">核心测试用例会把模型生成的代码拼上你写的 harness（断言脚本），在服务器沙箱子进程里<strong>真实执行</strong>。这等同于你自己在这台服务器上跑代码，请只在完全信任自己写的 harness 时使用。新增时需要重新输入登录密码确认，并会记录到审计日志。</p>
+        <div class="settings-row">
+          <input type="text" id="coreTestName" class="settings-input" placeholder="用例名称" />
+        </div>
+        <textarea id="coreTestPrompt" class="settings-input" rows="2" placeholder="发给模型的提示词（要求模型写代码）" style="width:100%; resize: vertical;"></textarea>
+        <textarea id="coreTestHarness" class="settings-input" rows="6" placeholder="Python 断言脚本(harness)，会拼在模型代码后面执行，最后打印 ALL_PASS 表示通过" style="width:100%; resize: vertical; font-family: var(--font-mono);"></textarea>
+        <div class="settings-row">
+          <input type="password" id="coreTestPassword" class="settings-input" placeholder="重新输入登录密码以确认" />
+          <button id="coreTestSaveBtn" class="btn btn--danger">⚠️ 确认保存并允许执行</button>
+        </div>
+        <div id="coreTestList" class="share-token-list"></div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">审计日志</h3>
+        <p class="panel__hint">记录登录失败、设置变更、分享链接生成等管理操作。最多保留最近 1000 条。</p>
+        <button id="auditExportBtn" class="btn">⬇️ 导出为 CSV</button>
       </div>
     </section>
   </main>

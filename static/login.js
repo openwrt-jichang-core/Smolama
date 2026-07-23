@@ -1,9 +1,15 @@
+if (window.localStorage.getItem('ollama-scanner-theme') === 'light') {
+  document.documentElement.setAttribute('data-theme', 'light');
+}
+
 const loginForm = document.getElementById('loginForm');
 const loginPassword = document.getElementById('loginPassword');
+const loginTotp = document.getElementById('loginTotp');
 const loginSubmit = document.getElementById('loginSubmit');
 const loginError = document.getElementById('loginError');
 
 let lockdownTimer = null;
+let totpRequired = false;
 
 function setError(msg) {
   loginError.textContent = msg || '';
@@ -27,6 +33,12 @@ function startLockCountdown(seconds) {
   lockdownTimer = setInterval(tick, 1000);
 }
 
+function detailMessage(detail) {
+  if (!detail) return '';
+  if (typeof detail === 'string') return detail;
+  return detail.message || '';
+}
+
 loginForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const password = loginPassword.value;
@@ -40,7 +52,7 @@ loginForm.addEventListener('submit', async (e) => {
     const res = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ password, totp_code: totpRequired ? loginTotp.value.trim() : undefined }),
     });
     if (res.ok) {
       window.location.href = '/';
@@ -48,15 +60,22 @@ loginForm.addEventListener('submit', async (e) => {
     }
     const err = await res.json().catch(() => ({}));
     if (res.status === 429) {
-      const match = /(\d+)\s*秒/.exec(err.detail || '');
+      const match = /(\d+)\s*秒/.exec(detailMessage(err.detail));
       if (match) {
         startLockCountdown(parseInt(match[1], 10));
       } else {
-        setError(err.detail || '请求过于频繁，请稍后再试');
+        setError(detailMessage(err.detail) || '请求过于频繁，请稍后再试');
         loginSubmit.disabled = false;
       }
+    } else if (err.detail && typeof err.detail === 'object' && err.detail.code === 'totp_required') {
+      totpRequired = true;
+      loginTotp.style.display = '';
+      loginTotp.focus();
+      setError(err.detail.message || '请输入两步验证码');
+      loginSubmit.disabled = false;
+      return; // 保留已输入的密码，不清空
     } else {
-      setError(err.detail || '密码错误');
+      setError(detailMessage(err.detail) || '密码错误');
       loginSubmit.disabled = false;
     }
   } catch (err) {
