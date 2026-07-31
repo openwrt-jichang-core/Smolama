@@ -1,36 +1,43 @@
 import asyncio
 import json
 import logging
-import uuid
 import time
-from typing import Dict, Optional, Tuple
+import uuid
 from datetime import datetime, timezone
+from typing import Dict, Optional, Tuple
 
-from playwright.async_api import async_playwright, Page, Browser, BrowserContext, CDPSession
+from playwright.async_api import (
+    Browser,
+    BrowserContext,
+    CDPSession,
+    Page,
+    async_playwright,
+)
 from playwright_stealth import stealth_async
 
 logger = logging.getLogger(__name__)
+
 
 def timestamp_iso() -> str:
     """生成符合 ISO 8601 标准的当前 UTC 时间字符串"""
     return datetime.now(timezone.utc).isoformat()
 
+
 class LoginSession:
     """
     单个交互式登录会话，管理 Playwright 实例、页面和 CDP 截屏推送
     """
+
     def __init__(self, session_id: str, login_url: str):
         self.session_id = session_id
         self.login_url = login_url
         self.created_at = time.time()
         self.last_active = time.time()
         self.is_active = True
-        
         self.viewport = {"width": 1280, "height": 800}
         self.quality = 60
-        
         self.queue: asyncio.Queue = asyncio.Queue()
-        
+
         self._playwright = None
         self._browser = None
         self._context = None
@@ -41,7 +48,6 @@ class LoginSession:
     async def start(self):
         try:
             self._playwright = await async_playwright().start()
-            
             # 使用 False (配合 Docker 里的 Xvfb 虚拟屏幕，彻底通过 Cloudflare 检测并防止无头崩溃)
             self._browser = await self._playwright.chromium.launch(
                 headless=False,
@@ -55,7 +61,6 @@ class LoginSession:
                     "--password-store=basic",
                 ],
             )
-            
             self._context = await self._browser.new_context(
                 viewport=self.viewport,
                 user_agent=(
@@ -65,25 +70,18 @@ class LoginSession:
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
             )
-            
             self._page = await self._context.new_page()
-            
+
             # 强行抹除 automation 特征
             await self._page.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
-                });
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
             """)
-            
             await stealth_async(self._page)
-            
+
             # CDP Session 画面传输
             self._cdp = await self._context.new_cdp_session(self._page)
             self._cdp.on("Page.screencastFrame", self._on_frame)
-            
             await self._cdp.send(
                 "Page.startScreencast",
                 {
@@ -92,14 +90,18 @@ class LoginSession:
                     "maxWidth": self.viewport["width"],
                     "maxHeight": self.viewport["height"],
                     "everyNthFrame": 1,
-                }
+                },
             )
 
             # 打开目标页面
             try:
-                await self._page.goto(self.login_url, wait_until="domcontentloaded", timeout=45000)
+                await self._page.goto(
+                    self.login_url, wait_until="domcontentloaded", timeout=45000
+                )
             except Exception as goto_err:
-                logger.warning(f"页面跳转未彻底完成，但继续传输画面: {goto_err}")
+                logger.warning(
+                    f"页面跳转未彻底完成，但继续传输画面: {goto_err}"
+                )
 
             logger.info(f"会话 {self.session_id} 初始化并启动成功")
         except Exception as e:
@@ -113,15 +115,14 @@ class LoginSession:
         data = event.get("data")
         metadata = event.get("metadata")
         sessionId = event.get("sessionId")
-        
         self._frame_session_id = sessionId
-        
+
         if data:
             frame_payload = {
                 "type": "frame",
                 "data": data,
                 "metadata": metadata,
-                "timestamp": timestamp_iso()
+                "timestamp": timestamp_iso(),
             }
             try:
                 self.queue.put_nowait(frame_payload)
@@ -132,7 +133,10 @@ class LoginSession:
         """确认帧"""
         if self._cdp and self._frame_session_id:
             try:
-                await self._cdp.send("Page.screencastFrameAck", {"sessionId": self._frame_session_id})
+                await self._cdp.send(
+                    "Page.screencastFrameAck",
+                    {"sessionId": self._frame_session_id},
+                )
             except Exception as e:
                 logger.warning(f"确认帧失败: {e}")
 
@@ -196,6 +200,7 @@ class LoginSession:
 
 class SessionManager:
     """全局会话管理器"""
+
     def __init__(self):
         self.sessions: Dict[str, LoginSession] = {}
         self._cleanup_task = None
@@ -212,7 +217,6 @@ class SessionManager:
             for sid, session in list(self.sessions.items()):
                 if now - session.last_active > 600:
                     expired_ids.append(sid)
-            
             for sid in expired_ids:
                 logger.info(f"会话 {sid} 超时，开始自动清理")
                 session = self.sessions.pop(sid, None)
@@ -242,5 +246,6 @@ class SessionManager:
 
     async def close(self, session_id: str):
         await self.close_session(session_id)
+
 
 login_manager = SessionManager()
