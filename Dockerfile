@@ -1,33 +1,30 @@
-# 1. 改用微软官方预装了 Playwright + Chromium + 系统依赖的 Python 镜像
-#    解决在 slim 镜像上用 apt/playwright 安装依赖时内存暴涨导致的 Coolify 255 退出问题
 FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
+
+# 安装 xvfb (用于提供虚拟图形显示)
+RUN apt-get update && apt-get install -y \
+    xvfb \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 2. 安装 Python 依赖
-COPY backend/requirements.txt ./backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+# 复制依赖文件并安装
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
-# 3. 复制前端与后端代码
-COPY backend ./backend
-COPY static ./static
+# 安装 Playwright 浏览器
+RUN playwright install chromium
 
-ENV DATA_DIR=/data
+# 复制后端项目代码
+COPY backend /app/backend
 
-# 4. 保留非 root 低权限用户安全机制
-RUN useradd --create-home --shell /usr/sbin/nologin scanner \
-    && mkdir -p /data \
-    && chown -R scanner:scanner /app /data
-
-VOLUME ["/data"]
+WORKDIR /app/backend
 
 EXPOSE 8000
 
-# 5. 保留健康检查逻辑
+# 健康检查
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/session')" || exit 1
 
-# 6. 以低权限 scanner 用户运行服务
-USER scanner
-WORKDIR /app/backend
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# 使用 Xvfb 启动 FastAPI，让 Playwright 在虚拟屏下稳定运行
+CMD ["xvfb-run", "--server-args=-screen 0 1280x800x24", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
