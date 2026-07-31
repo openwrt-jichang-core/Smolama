@@ -42,21 +42,20 @@ class LoginSession:
         try:
             self._playwright = await async_playwright().start()
             
-            # 1. 优化 Chromium 启动参数以躲避 Cloudflare 检测
+            # 使用 False (配合 Docker 里的 Xvfb 虚拟屏幕，彻底通过 Cloudflare 检测并防止无头崩溃)
             self._browser = await self._playwright.chromium.launch(
-                headless=True,
+                headless=False,
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                    "--disable-blink-features=AutomationControlled", # 禁用自动化标记
-                    "--disable-infobars",
-                    "--window-size=1280,800",
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-first-run",
+                    "--no-service-autorun",
+                    "--password-store=basic",
                 ],
             )
             
-            # 2. 伪装真实的上下文配置
             self._context = await self._browser.new_context(
                 viewport=self.viewport,
                 user_agent=(
@@ -65,12 +64,11 @@ class LoginSession:
                 ),
                 locale="zh-CN",
                 timezone_id="Asia/Shanghai",
-                device_scale_factor=1,
             )
             
             self._page = await self._context.new_page()
             
-            # 3. 强行抹除 headless / automation 特征
+            # 强行抹除 automation 特征
             await self._page.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
@@ -78,19 +76,14 @@ class LoginSession:
                 Object.defineProperty(navigator, 'plugins', {
                     get: () => [1, 2, 3, 4, 5]
                 });
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['zh-CN', 'zh', 'en']
-                });
             """)
             
-            # 4. 注入 playwright-stealth 脚本
             await stealth_async(self._page)
             
-            # 5. 设置 CDP Session 用于实时传屏
+            # CDP Session 画面传输
             self._cdp = await self._context.new_cdp_session(self._page)
             self._cdp.on("Page.screencastFrame", self._on_frame)
             
-            # 先开启 CDP 画面推送
             await self._cdp.send(
                 "Page.startScreencast",
                 {
@@ -102,20 +95,20 @@ class LoginSession:
                 }
             )
 
-            # 6. 导航至目标页面（提高超时忍耐度）
+            # 打开目标页面
             try:
-                await self._page.goto(self.login_url, wait_until="commit", timeout=60000)
+                await self._page.goto(self.login_url, wait_until="domcontentloaded", timeout=45000)
             except Exception as goto_err:
-                logger.warning(f"页面加载非完全完成，但继续渲染画面: {goto_err}")
+                logger.warning(f"页面跳转未彻底完成，但继续传输画面: {goto_err}")
 
             logger.info(f"会话 {self.session_id} 初始化并启动成功")
         except Exception as e:
-            logger.error(f"启动会话 {self.session_id} 失败: {e}")
+            logger.error(f"启动会话 {self.session_id} 失败: {e}", exc_info=True)
             await self.close()
             raise e
 
     def _on_frame(self, event):
-        """CDP 截图回调函数"""
+        """CDP 截图回调"""
         self.last_active = time.time()
         data = event.get("data")
         metadata = event.get("metadata")
@@ -136,7 +129,7 @@ class LoginSession:
                 pass
 
     async def ack_frame(self):
-        """确认已接收帧，告知 CDP 允许发送下一帧"""
+        """确认帧"""
         if self._cdp and self._frame_session_id:
             try:
                 await self._cdp.send("Page.screencastFrameAck", {"sessionId": self._frame_session_id})
@@ -171,7 +164,7 @@ class LoginSession:
                 logger.error(f"注入按键失败: {e}")
 
     async def close(self):
-        """清理并关闭所有会话资源"""
+        """清理资源"""
         self.is_active = False
         if self._cdp:
             try:
@@ -217,7 +210,6 @@ class SessionManager:
             now = time.time()
             expired_ids = []
             for sid, session in list(self.sessions.items()):
-                # 超过 10 分钟无操作自动清理
                 if now - session.last_active > 600:
                     expired_ids.append(sid)
             
@@ -235,14 +227,12 @@ class SessionManager:
         return session_id
 
     async def create(self, login_url: str, **kwargs) -> str:
-        """为保持 compatibility / main.py 调用的 create 别名"""
         return await self.create_session(login_url)
 
     def get_session(self, session_id: str) -> Optional[LoginSession]:
         return self.sessions.get(session_id)
 
     def get(self, session_id: str) -> Optional[LoginSession]:
-        """别名方法"""
         return self.sessions.get(session_id)
 
     async def close_session(self, session_id: str):
@@ -251,7 +241,6 @@ class SessionManager:
             await session.close()
 
     async def close(self, session_id: str):
-        """别名方法"""
         await self.close_session(session_id)
 
 login_manager = SessionManager()
