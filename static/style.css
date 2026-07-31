@@ -1266,14 +1266,21 @@ code {
 
 /* ===== 地址自动发现：交互式登录（远程浏览器画面）===== */
 .ad-login-modal {
+  display: none;
   position: fixed;
   inset: 0;
   z-index: 200;
   background: rgba(6, 8, 10, 0.78);
-  display: flex;
   align-items: center;
   justify-content: center;
   padding: 20px;
+}
+/* 之前这里给 .ad-login-modal 直接写了 display:flex，属于"普通作者样式"，
+   优先级会盖过浏览器内置的 [hidden]{display:none} 规则——导致这个铺满全屏的
+   遮罩层从页面一加载就一直显示着、挡在最上层吞掉点击，看起来就像"点按钮没反应"。
+   现在默认 display:none，只有没有 hidden 属性时才切成 flex 显示。 */
+.ad-login-modal:not([hidden]) {
+  display: flex;
 }
 .ad-login-modal__box {
   width: min(1320px, 100%);
