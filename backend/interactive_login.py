@@ -15,7 +15,7 @@ Cloudflare 的勾选框，这一步没法也不该由代码代劳，必须是真
 用一次（自动尝试填进输入框），不会被写进任何文件。之后地址自动发现的定时抓取
 会带着这份 Cookie 去请求，不需要你再手动复制粘贴 Cookie 字符串。
 
-依赖：pip install playwright && playwright install --with-deps chromium
+依赖：pip install playwright playwright-stealth && playwright install --with-deps chromium
 """
 import asyncio
 import secrets
@@ -23,6 +23,7 @@ import time
 from typing import Optional
 
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async  # 🔥 1. 导入 stealth 模块
 
 # 会话相关的时间限制：
 # - 一个交互登录会话最多存活这么久（哪怕一直没人点"完成"），防止有人开了就忘、
@@ -73,7 +74,13 @@ class LoginSession:
             # 参数浏览器直接起不来。这是"跑在受限容器里的无头浏览器"的常规取舍。
             self._browser = await self._playwright.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    # 🔥 2. 移除 Chromium Blink 引擎的自动化标志
+                    "--disable-blink-features=AutomationControlled",
+                ],
             )
             self._context = await self._browser.new_context(
                 viewport=self.viewport,
@@ -83,6 +90,10 @@ class LoginSession:
                 ),
             )
             self._page = await self._context.new_page()
+
+            # 🔥 3. 在跳转页面前给 page 注入反检测隐身补丁
+            await stealth_async(self._page)
+
             self._cdp = await self._context.new_cdp_session(self._page)
             self._cdp.on("Page.screencastFrame", self._on_frame)
             await self._page.goto(self.login_url, wait_until="domcontentloaded", timeout=20000)
