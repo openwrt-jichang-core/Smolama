@@ -90,8 +90,7 @@ class LoginSession:
             self._cdp = await self._context.new_cdp_session(self._page)
             self._cdp.on("Page.screencastFrame", self._on_frame)
             
-            await self._page.goto(self.login_url, wait_until="domcontentloaded", timeout=30000)
-            
+            # 先开启 CDP 画面推送
             await self._cdp.send(
                 "Page.startScreencast",
                 {
@@ -102,6 +101,13 @@ class LoginSession:
                     "everyNthFrame": 1,
                 }
             )
+
+            # 6. 导航至目标页面（提高超时忍耐度）
+            try:
+                await self._page.goto(self.login_url, wait_until="commit", timeout=60000)
+            except Exception as goto_err:
+                logger.warning(f"页面加载非完全完成，但继续渲染画面: {goto_err}")
+
             logger.info(f"会话 {self.session_id} 初始化并启动成功")
         except Exception as e:
             logger.error(f"启动会话 {self.session_id} 失败: {e}")
@@ -237,7 +243,7 @@ class SessionManager:
 
     def get(self, session_id: str) -> Optional[LoginSession]:
         """别名方法"""
-        return self.get_session(session_id)
+        return self.sessions.get(session_id)
 
     async def close_session(self, session_id: str):
         session = self.sessions.pop(session_id, None)
