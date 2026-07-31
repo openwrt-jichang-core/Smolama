@@ -1246,20 +1246,6 @@ setInterval(() => {
     ws.send(JSON.stringify({ type: 'click', x: p.x, y: p.y }));
   });
 
-  // 转发真实鼠标移动轨迹：之前只转发 click，鼠标在远程页面里等于"瞬移"到点击坐标再点击，
-  // 完全没有移动过程——这对 Cloudflare Turnstile 这类行为校验是很典型的自动化特征，人工
-  // 操作真实浏览器不可能做到零移动直接点中。这里节流到大约每 30ms 发一次，把你在画布上
-  // 移动鼠标的真实轨迹同步给远程浏览器，让它看起来（也确实）是一次正常的人类交互。
-  let lastMoveSent = 0;
-  canvas.addEventListener('mousemove', (evt) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const now = performance.now();
-    if (now - lastMoveSent < 30) return;
-    lastMoveSent = now;
-    const p = canvasEventToPoint(evt);
-    ws.send(JSON.stringify({ type: 'move', x: p.x, y: p.y }));
-  });
-
   canvas.addEventListener('wheel', (evt) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     evt.preventDefault();
