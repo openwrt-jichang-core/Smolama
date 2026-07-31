@@ -1,3 +1,7 @@
+# 钉死在 Debian 12 (bookworm)，不用会随 python:3.11-slim 滚动升级的最新版：
+# Playwright 目前只正式支持到 bookworm，装到更新的 Debian 13 (trixie) 上时
+# `playwright install --with-deps` 会套用不匹配的依赖包列表（比如把 trixie 已经
+# 改名/移除的字体包也列进去），装不到就直接构建失败。
 FROM python:3.11-slim-bookworm
 
 WORKDIR /app
