@@ -228,12 +228,24 @@ class SessionManager:
         self.sessions[session_id] = session
         return session_id
 
+    async def create(self, login_url: str, **kwargs) -> str:
+        """为保持 compatibility / main.py 调用的 create 别名"""
+        return await self.create_session(login_url)
+
     def get_session(self, session_id: str) -> Optional[LoginSession]:
         return self.sessions.get(session_id)
+
+    def get(self, session_id: str) -> Optional[LoginSession]:
+        """别名方法"""
+        return self.get_session(session_id)
 
     async def close_session(self, session_id: str):
         session = self.sessions.pop(session_id, None)
         if session:
             await session.close()
+
+    async def close(self, session_id: str):
+        """别名方法"""
+        await self.close_session(session_id)
 
 login_manager = SessionManager()
