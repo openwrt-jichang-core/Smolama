@@ -199,11 +199,16 @@ class LoginSession:
                 logger.warning(f"自动填充密码失败（可以手动填）: {e}")
 
     async def click(self, x: float, y: float, button: str = "left"):
-        """模拟点击"""
+        """模拟点击。down/up 之间留一点小延迟（真人点击不可能是 0ms），
+        配合前端现在会转发的真实 mousemove 轨迹，让这次点击尽量贴近真实人类操作，
+        而不是"鼠标瞬移到坐标后立刻按下抬起"这种典型自动化特征。"""
         self.last_active = time.time()
         if self._page:
             try:
-                await self._page.mouse.click(x, y, button=button)
+                await self._page.mouse.move(x, y)
+                await self._page.mouse.down(button=button)
+                await asyncio.sleep(0.06)
+                await self._page.mouse.up(button=button)
             except Exception as e:
                 logger.error(f"注入点击失败: {e}")
 
