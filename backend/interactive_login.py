@@ -55,6 +55,8 @@ class LoginSession:
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
+                    "--disable-gpu",                  # 💥 必须补充：服务器无显卡渲染必备
+                    "--disable-software-rasterizer",  # 💥 必须补充：禁用软件光栅化崩溃
                     "--disable-blink-features=AutomationControlled",
                     "--no-first-run",
                     "--no-service-autorun",
@@ -185,9 +187,9 @@ class LoginSession:
                 await self._context.close()
             except Exception:
                 pass
-        if self._browser:
+        if :
             try:
-                await self._browser.close()
+                await .close()
             except Exception:
                 pass
         if self._playwright:
