@@ -1,37 +1,41 @@
-FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
-
-# 安装 curl 和 xvfb (用于虚拟屏幕渲染)
-RUN apt-get update && apt-get install -y \
-    curl \
-    xvfb \
-    && rm -rf /var/lib/apt/lists/*
+# 钉死在 Debian 12 (bookworm)，不用会随 python:3.11-slim 滚动升级的最新版：
+# Playwright 目前只正式支持到 bookworm，装到更新的 Debian 13 (trixie) 上时
+# `playwright install --with-deps` 会套用不匹配的依赖包列表（比如把 trixie 已经
+# 改名/移除的字体包也列进去），装不到就直接构建失败。
+FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
-# 预创建静态目录
-RUN mkdir -p /app/static /app/backend/static
+COPY backend/requirements.txt ./backend/requirements.txt
+RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# 复制依赖并安装
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+# 交互式登录功能要用到一个真实的无头 Chromium：装浏览器本体 + 它需要的系统依赖
+# （字体、libnss3 之类）。这一步只能在 root 下跑（apt 装系统包），装完再把浏览器
+# 目录的所有权交给下面创建的低权限用户。镜像会因此大不少（几百 MB），属于这个
+# 功能本身的代价，不需要就不用改 docker-compose 里 shm_size 也没关系
+# （launch 参数已经带了 --disable-dev-shm-usage）。
+RUN PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers python3 -m playwright install --with-deps chromium
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 
-# 💥 关键修复：强行重新安装/补全与当前 Playwright 版本匹配的 Chromium
-RUN playwright install chromium
+COPY backend ./backend
+COPY static ./static
 
-# 复制项目代码
-COPY static/ /app/static/
-COPY backend /app/backend
+ENV DATA_DIR=/data
 
-WORKDIR /app/backend
+# 以非 root 用户运行：即便攻击者通过某种途径（例如构造恶意生成代码）拿到进程权限，
+# 破坏面也仅限于该低权限用户，而不是容器内 root。
+RUN useradd --create-home --shell /usr/sbin/nologin scanner \
+    && mkdir -p /data \
+    && chown -R scanner:scanner /app /data /opt/pw-browsers
+
+VOLUME ["/data"]
 
 EXPOSE 8000
 
-# 设置虚拟显示器
-ENV DISPLAY=:99
+# /api/session 无需鉴权即可访问且响应很轻，适合当健康检查探针
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/session', timeout=3)" || exit 1
 
-# 健康检查
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://127.0.0.1:8000/ || exit 1
-
-# 后台启动 Xvfb，并以反向代理模式启动 Uvicorn
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1280x1024x24 -ac & exec uvicorn main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+USER scanner
+WORKDIR /app/backend
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
