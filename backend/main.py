@@ -2028,6 +2028,8 @@ def _scheduler_loop():
 @app.on_event("startup")
 def _start_background_threads():
     threading.Thread(target=_scheduler_loop, daemon=True).start()
+    # 交互式登录会话的超时自动清理循环（之前从未启动，废弃的浏览器会话会一直占资源）
+    login_manager.start_cleanup_loop()
 
 
 def guess_model_family(model_name):
