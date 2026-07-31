@@ -48,15 +48,15 @@ class LoginSession:
     async def start(self):
         try:
             self._playwright = await async_playwright().start()
-            # 使用 False (配合 Docker 里的 Xvfb 虚拟屏幕，彻底通过 Cloudflare 检测并防止无头崩溃)
+            # 使用 False 搭配 Docker Xvfb 虚拟屏幕，补充服务器防崩溃参数
             self._browser = await self._playwright.chromium.launch(
                 headless=False,
                 args=[
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
-                    "--disable-gpu",                  # 💥 必须补充：服务器无显卡渲染必备
-                    "--disable-software-rasterizer",  # 💥 必须补充：禁用软件光栅化崩溃
+                    "--disable-gpu",
+                    "--disable-software-rasterizer",
                     "--disable-blink-features=AutomationControlled",
                     "--no-first-run",
                     "--no-service-autorun",
@@ -187,9 +187,9 @@ class LoginSession:
                 await self._context.close()
             except Exception:
                 pass
-        if :
+        if self._browser:
             try:
-                await .close()
+                await self._browser.close()
             except Exception:
                 pass
         if self._playwright:
