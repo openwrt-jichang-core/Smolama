@@ -13,13 +13,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from auth import AuthManager
-from interactive_login import login_manager
 from scanner import (
     ScanState,
     quick_test,
@@ -53,11 +52,6 @@ ARCHIVES_FILE = DATA_DIR / "archives.json"
 
 # 地球可视化用：IP归属地查询结果本地缓存(31天有效)，避免每次打开地球界面都重新调用外部接口。
 GEOIP_CACHE_FILE = DATA_DIR / "geoip_cache.json"
-
-# 地址自动发现：每次运行(手动测试或定时触发)都追加一条记录到这里，哪怕刷新页面/重开浏览器
-# 也能看到历史记录，而不是只有 settings.json 里那一条"最近一次"。
-DISCOVERY_LOG_FILE = DATA_DIR / "discovery_log.json"
-DISCOVERY_LOG_MAX_ENTRIES = 300
 
 DEFAULT_SETTINGS = {
     "schedule": {
@@ -105,18 +99,9 @@ DEFAULT_SETTINGS = {
         "group": "",
         "tags": [],
         "last_run_at": None,
-        "last_status": None,     # "ok" | "cf_blocked" | "need_login" | "error"
+        "last_status": None,     # "ok" | "cf_blocked" | "error"
         "last_message": "",
         "last_found": [],        # 最近一次提取到的地址列表
-        # 如果目标网页需要登录才能看到内容：先在设置里填这个登录页地址，然后走
-        # "交互式登录"（前端会打开一个远程浏览器画面，账号密码在自己电脑/手机上
-        # 输入，遇到 Cloudflare 之类的人机验证也是自己去点），登录成功后这里只
-        # 保存拿到的 Cookie，用户名/密码不落盘。定时抓取会带着这份 Cookie 去请求。
-        "login_url": "",
-        "cookies": [],            # [{"name","value","domain","path",...}]，来自 Playwright context.cookies()
-        "cookies_saved_at": None,
-        "cookies_login_url": "",  # 这份 Cookie 是在哪个登录页地址下拿到的，方便核对
-        "auth_status": None,      # None | "ok" | "need_login" —— 定时抓取发现 Cookie 过期时会置成 need_login
     },
 }
 
@@ -151,26 +136,6 @@ _archives_lock = threading.Lock()
 _geoip_lock = threading.Lock()
 _settings_lock = threading.Lock()
 _history_lock = threading.Lock()
-_discovery_log_lock = threading.Lock()
-
-
-def _append_discovery_log(entry: dict):
-    """追加一条地址自动发现的运行记录（手动测试 or 定时触发都走这里），落盘保存，
-    刷新页面/换设备打开都还能看到，不依赖内存状态。"""
-    with _discovery_log_lock:
-        logs = _load_json_file(DISCOVERY_LOG_FILE, [])
-        logs.append(entry)
-        if len(logs) > DISCOVERY_LOG_MAX_ENTRIES:
-            logs = logs[-DISCOVERY_LOG_MAX_ENTRIES:]
-        _save_json_file(DISCOVERY_LOG_FILE, logs)
-
-
-def _load_discovery_log(limit: int = 100):
-    with _discovery_log_lock:
-        logs = _load_json_file(DISCOVERY_LOG_FILE, [])
-    if limit:
-        logs = logs[-limit:]
-    return list(reversed(logs))  # 最新的在最前面，前端不用自己倒序
 
 SESSION_COOKIE = "scanner_session"
 # 部署在 Coolify/反代之后走 HTTPS 时应保持默认 true；纯本地 http 调试可设 COOKIE_SECURE=false
@@ -462,6 +427,21 @@ def _enrich_host_status(hosts):
 @app.get("/api/hosts")
 def get_hosts(auth=Depends(require_auth)):
     return _enrich_host_status(load_hosts())
+
+
+@app.delete("/api/hosts/all")
+def delete_all_hosts(request: Request, auth=Depends(require_auth)):
+    """一键清空整个主机列表（正常的 + 失败区的全部删掉），需要前端弹窗二次确认，
+    这里不再额外要求密码——跟删单条主机的破坏力是同一个量级，保持一致的确认强度。"""
+    with _hosts_lock:
+        hosts = load_hosts()
+        removed_urls = [h["url"] for h in hosts]
+        save_hosts([])
+    for url in removed_urls:
+        _purge_host_from_leaderboard(url)
+        _purge_host_from_ping_status(url)
+    _record_audit(request, "delete_all_hosts", f"{len(removed_urls)} 个")
+    return {"removed": len(removed_urls), "hosts": []}
 
 
 @app.delete("/api/hosts/failed")
@@ -881,7 +861,6 @@ _CF_CHALLENGE_MARKERS = (
 # 从网页正文里提取 ip:port，默认更偏向 11434（Ollama默认端口），但不限定端口，
 # 因为用户可能用别的端口。跟批量粘贴用的是同一套思路。
 _ADDR_RE = re.compile(r"(?:https?://)?(\d{1,3}(?:\.\d{1,3}){3})(?::(\d{1,5}))?")
-_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _looks_like_cf_challenge(status_code: int, text: str) -> bool:
@@ -895,38 +874,12 @@ def _looks_like_cf_challenge(status_code: int, text: str) -> bool:
     return any(marker in low for marker in _CF_CHALLENGE_MARKERS)
 
 
-# 判断"拿到的其实是登录页/未登录状态"，而不是真正想要的内容——用来提示
-# 之前存的 Cookie 已经过期，需要重新走一次交互式登录，而不是让它一直空转。
-# 纯启发式：页面里有密码输入框，基本就能断定当前不是已登录状态。
-def _looks_like_login_page(text: str) -> bool:
-    if not text:
-        return False
-    low = text.lower()
-    return "type=\"password\"" in low or "type='password'" in low
-
-
-def _cookies_to_requests_dict(cookies) -> dict:
-    if not cookies:
-        return {}
-    out = {}
-    for c in cookies:
-        name = c.get("name")
-        if name:
-            out[name] = c.get("value", "")
-    return out
-
-
-def _fetch_and_extract_addresses(url: str, default_port: str = "11434", cookies=None):
+def _fetch_and_extract_addresses(url: str, default_port: str = "11434"):
     """访问一个网页(自己的域名/内网地址都行)，从返回内容里提取 ip[:port] 地址。
-    返回 (status, message, found_urls, preview)：
+    返回 (status, message, found_urls)：
       status = "ok"          正常拿到内容并解析（找不到地址也算 ok，found_urls 可能是空列表）
       status = "cf_blocked"  响应看起来是 Cloudflare 的验证挑战页，不是真实内容
-      status = "need_login"  响应看起来是登录页——带上的 Cookie 可能已经过期，需要重新交互式登录
       status = "error"       请求本身失败（超时/DNS/连接被拒绝等）
-      找不到地址时可以看 preview 字段（去标签后的正文前300字），用来判断到底是页面里
-      真没有，还是页面靠前端框架异步渲染、这次 GET 请求本来就拿不到看到的内容。
-    cookies: 可选，交互式登录保存下来的 Cookie 列表（Playwright context.cookies() 格式），
-      带上它一起请求就相当于"已登录"状态去访问。
     """
     headers = {
         "User-Agent": (
@@ -936,12 +889,9 @@ def _fetch_and_extract_addresses(url: str, default_port: str = "11434", cookies=
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
     try:
-        resp = requests.get(
-            url, headers=headers, timeout=8,
-            cookies=_cookies_to_requests_dict(cookies) if cookies else None,
-        )
+        resp = requests.get(url, headers=headers, timeout=8)
     except Exception as e:
-        return "error", f"请求失败：{type(e).__name__}: {e}", [], ""
+        return "error", f"请求失败：{type(e).__name__}: {e}", []
 
     text = resp.text or ""
     if _looks_like_cf_challenge(resp.status_code, text):
@@ -950,36 +900,21 @@ def _fetch_and_extract_addresses(url: str, default_port: str = "11434", cookies=
             f"拿到的内容像是 Cloudflare 的验证挑战页（HTTP {resp.status_code}），不是网页真实内容。"
             f"这不是代码能直接绕过的——Cloudflare 的JS挑战需要真的执行JS才能过，普通HTTP请求做不到。"
             f"建议：在 Cloudflare 后台给这个路径/本服务器出口IP加一条「跳过安全检查」的规则，"
-            f"或者干脆把发布这个地址的页面放在一个不接入CF代理（DNS-only/灰色云朵）的子域名下，"
-            f"又或者如果这个页面本身就需要登录，用下面的「交互式登录」在真实浏览器里过一次验证。",
+            f"或者干脆把发布这个地址的页面放在一个不接入CF代理（DNS-only/灰色云朵）的子域名下。",
             [],
-            "",
-        )
-    if cookies and _looks_like_login_page(text):
-        return (
-            "need_login",
-            "拿到的内容看起来是登录页，说明保存的 Cookie 已经过期或还没登录成功，"
-            "请重新走一遍下面的「交互式登录」。",
-            [],
-            "",
         )
     if resp.status_code >= 400:
-        return "error", f"网页返回了 HTTP {resp.status_code}", [], ""
-
-    stripped = _TAG_RE.sub("", text)  # 去掉标签，防止 IP 被拆在不同标签里导致原始文本匹配不到
+        return "error", f"网页返回了 HTTP {resp.status_code}", []
 
     matches = []
     seen = set()
-    for m in _ADDR_RE.finditer(text + "\n" + stripped):
+    for m in _ADDR_RE.finditer(text):
         ip, port = m.group(1), m.group(2) or default_port
         addr = f"http://{ip}:{port}"
         if addr not in seen:
             seen.add(addr)
             matches.append(addr)
-
-    preview = " ".join(stripped.split())[:300]
-    msg = f"成功获取网页内容，提取到 {len(matches)} 个地址" if matches else "成功获取网页内容，但没有提取到任何 ip:port 地址"
-    return "ok", msg, matches, preview
+    return "ok", f"成功获取网页内容，提取到 {len(matches)} 个地址" if matches else "成功获取网页内容，但没有提取到任何 ip:port 地址", matches
 
 
 def _auto_add_discovered_host(url: str, group: str, tags: list):
@@ -1594,7 +1529,6 @@ class AddressDiscoveryIn(BaseModel):
     interval_minutes: int = 30
     group: str = ""
     tags: list[str] = []
-    login_url: str = ""
 
 
 @app.get("/api/settings/address-discovery")
@@ -1619,7 +1553,6 @@ def put_address_discovery(body: AddressDiscoveryIn, request: Request, auth=Depen
             "interval_minutes": body.interval_minutes,
             "group": body.group.strip()[:50],
             "tags": body.tags,
-            "login_url": body.login_url.strip(),
         }
         _save_json_file(SETTINGS_FILE, settings)
     _record_audit(request, "update_address_discovery", body.url or "(未设置)")
@@ -1629,152 +1562,14 @@ def put_address_discovery(body: AddressDiscoveryIn, request: Request, auth=Depen
 @app.post("/api/settings/address-discovery/test")
 def test_address_discovery(request: Request, auth=Depends(require_auth)):
     """立即测试一次，不等定时任务、不自动加主机，只是让你马上看到到底能不能拿到内容、
-    拿到的是不是 Cloudflare 的验证页——方便你确认要不要去 Cloudflare 后台加白名单规则。
-    注意：这里只是"测试提取"，不会往主机列表里加东西；真正会加主机的是下面的定时循环。"""
+    拿到的是不是 Cloudflare 的验证页——方便你确认要不要去 Cloudflare 后台加白名单规则。"""
     settings = _load_settings()
-    ad = settings.get("address_discovery", {})
-    url = ad.get("url", "").strip()
+    url = settings.get("address_discovery", {}).get("url", "").strip()
     if not url:
         raise HTTPException(status_code=400, detail="还没有配置目标网址")
-    status, message, found, preview = _fetch_and_extract_addresses(url, cookies=ad.get("cookies"))
+    status, message, found = _fetch_and_extract_addresses(url)
     _record_audit(request, "test_address_discovery", f"{url} -> {status}")
-    entry = {
-        "ts": datetime.now().isoformat(timespec="seconds"),
-        "trigger": "manual",
-        "url": url,
-        "status": status,
-        "message": message,
-        "found": found,
-        "added": 0,
-        "preview": preview,
-    }
-    _append_discovery_log(entry)
-    return entry
-
-
-@app.get("/api/settings/address-discovery/log")
-def get_address_discovery_log(limit: int = 100, auth=Depends(require_auth)):
-    """地址自动发现的历史运行记录（手动测试 + 定时触发都在里面），落盘存储，
-    刷新页面/换个设备打开也还能看到，不是只有内存里那一条。"""
-    return {"logs": _load_discovery_log(limit=max(1, min(limit, DISCOVERY_LOG_MAX_ENTRIES)))}
-
-
-@app.delete("/api/settings/address-discovery/log")
-def clear_address_discovery_log(request: Request, auth=Depends(require_auth)):
-    with _discovery_log_lock:
-        _save_json_file(DISCOVERY_LOG_FILE, [])
-    _record_audit(request, "clear_address_discovery_log", "")
-    return {"status": "cleared"}
-
-
-# ---------------------------------------------------------------------------
-# 交互式登录：目标网页需要登录/挂了 Cloudflare 人机验证时，普通 requests.get()
-# 过不去。这里起一个真实的无头浏览器，画面通过 WebSocket 实时转发到你自己的
-# 电脑/手机浏览器，账号密码在自己这边输入、验证框也是自己去点，登录成功后只把
-# Cookie 存下来给后续定时抓取用——不需要你手动复制粘贴 Cookie 字符串。
-# ---------------------------------------------------------------------------
-
-
-class InteractiveLoginStartIn(BaseModel):
-    login_url: str = ""
-    username: str = ""
-    password: str = ""
-    username_selector: str = ""
-    password_selector: str = ""
-
-
-@app.post("/api/settings/address-discovery/interactive-login/start")
-async def start_interactive_login(body: InteractiveLoginStartIn, request: Request, auth=Depends(require_auth)):
-    url = body.login_url.strip()
-    if not url:
-        raise HTTPException(status_code=400, detail="请先填写登录页面网址")
-    if not (url.startswith("http://") or url.startswith("https://")):
-        raise HTTPException(status_code=400, detail="登录页面网址需要以 http:// 或 https:// 开头")
-    try:
-        sess = await login_manager.create(url)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"启动远程浏览器失败：{type(e).__name__}: {e}")
-    if sess.status == "error":
-        raise HTTPException(status_code=502, detail=f"打开登录页面失败：{sess.error}")
-    if body.username or body.password:
-        try:
-            await sess.fill_credentials(body.username, body.password,
-                                         body.username_selector.strip(), body.password_selector.strip())
-        except Exception:
-            pass  # 自动填充失败没关系，改成在画面里手动点/输入即可
-    _record_audit(request, "interactive_login_start", url)
-    return {"session_id": sess.id, "status": sess.status, "viewport": sess.viewport}
-
-
-@app.websocket("/ws/interactive-login/{session_id}")
-async def ws_interactive_login(websocket: WebSocket, session_id: str):
-    token = websocket.cookies.get(SESSION_COOKIE)
-    if not auth_mgr.validate_session(token):
-        await websocket.close(code=4401)
-        return
-    sess = login_manager.get(session_id)
-    if not sess:
-        await websocket.close(code=4404)
-        return
-    await websocket.accept()
-    sess.ws_clients.add(websocket)
-    try:
-        await websocket.send_json({"type": "status", "status": sess.status, "error": sess.error})
-        while True:
-            msg = await websocket.receive_json()
-            t = msg.get("type")
-            try:
-                if t == "click":
-                    await sess.click(float(msg["x"]), float(msg["y"]))
-                elif t == "move":
-                    await sess.move(float(msg["x"]), float(msg["y"]))
-                elif t == "type":
-                    await sess.type_text(str(msg.get("text", ""))[:500])
-                elif t == "key":
-                    await sess.press_key(str(msg.get("key", ""))[:40])
-                elif t == "scroll":
-                    await sess.scroll(float(msg.get("dx", 0)), float(msg.get("dy", 0)))
-                elif t == "ping":
-                    await websocket.send_json({"type": "pong"})
-            except Exception:
-                pass  # 单次转发失败不该断掉整条 WebSocket 连接
-    except WebSocketDisconnect:
-        pass
-    finally:
-        sess.ws_clients.discard(websocket)
-
-
-@app.post("/api/settings/address-discovery/interactive-login/{session_id}/finish")
-async def finish_interactive_login(session_id: str, request: Request, auth=Depends(require_auth)):
-    sess = login_manager.get(session_id)
-    if not sess:
-        raise HTTPException(status_code=404, detail="登录会话不存在或已经超时关闭了，请重新开始")
-    cookies = await sess.get_cookies()
-    login_url = sess.login_url
-    await login_manager.close(session_id)
-    if not cookies:
-        raise HTTPException(status_code=400, detail="没有拿到任何 Cookie，登录可能还没完成")
-    with _settings_lock:
-        raw = _load_json_file(SETTINGS_FILE, {})
-        settings = _deep_merge_defaults(DEFAULT_SETTINGS, raw)
-        ad = settings.get("address_discovery", DEFAULT_SETTINGS["address_discovery"])
-        settings["address_discovery"] = {
-            **ad,
-            "login_url": login_url,
-            "cookies": cookies,
-            "cookies_saved_at": datetime.now().isoformat(timespec="seconds"),
-            "cookies_login_url": login_url,
-            "auth_status": "ok",
-        }
-        _save_json_file(SETTINGS_FILE, settings)
-    _record_audit(request, "interactive_login_finish", f"{login_url} -> 保存了 {len(cookies)} 个 cookie")
-    return {"status": "saved", "cookie_count": len(cookies)}
-
-
-@app.post("/api/settings/address-discovery/interactive-login/{session_id}/cancel")
-async def cancel_interactive_login(session_id: str, auth=Depends(require_auth)):
-    await login_manager.close(session_id)
-    return {"status": "cancelled"}
+    return {"status": status, "message": message, "found": found}
 
 
 # ---------------------------------------------------------------------------
@@ -1944,7 +1739,7 @@ def _scheduler_loop():
                     except Exception:
                         due = True
                 if due:
-                    status, message, found, preview = _fetch_and_extract_addresses(url, cookies=ad.get("cookies"))
+                    status, message, found = _fetch_and_extract_addresses(url)
                     added = 0
                     if status == "ok" and found:
                         for addr in found:
@@ -1953,45 +1748,17 @@ def _scheduler_loop():
                     if added:
                         message += f"，新增了 {added} 个主机"
                         state.log(f"[地址自动发现] 从 {url} 提取到 {len(found)} 个地址，新增了 {added} 个")
-                    # Cookie 过期了：只在"从 ok/None 变成 need_login"这一刻通知一次，避免每 20 秒轮询
-                    # 一次就轰炸一次通知——之后会一直停留在 need_login，等你重新交互式登录后才会变回 ok。
-                    if status == "need_login" and ad.get("auth_status") != "need_login":
-                        try:
-                            _send_notifications(
-                                "⚠️ 地址自动发现：登录已失效",
-                                f"目标网址 {url} 现在拿到的是登录页，保存的 Cookie 可能过期了，"
-                                f"请到管理后台的「地址自动发现」面板重新走一遍交互式登录。",
-                            )
-                        except Exception:
-                            pass
-                    ts_now = datetime.now().isoformat(timespec="seconds")
                     with _settings_lock:
                         raw = _load_json_file(SETTINGS_FILE, {})
                         settings2 = _deep_merge_defaults(DEFAULT_SETTINGS, raw)
-                        ad2 = settings2.get("address_discovery", DEFAULT_SETTINGS["address_discovery"])
-                        new_ad = {
-                            **ad2,
-                            "last_run_at": ts_now,
+                        settings2["address_discovery"] = {
+                            **settings2.get("address_discovery", DEFAULT_SETTINGS["address_discovery"]),
+                            "last_run_at": datetime.now().isoformat(timespec="seconds"),
                             "last_status": status,
                             "last_message": message,
                             "last_found": found,
                         }
-                        if status == "need_login":
-                            new_ad["auth_status"] = "need_login"
-                        elif status == "ok" and ad2.get("cookies"):
-                            new_ad["auth_status"] = "ok"
-                        settings2["address_discovery"] = new_ad
                         _save_json_file(SETTINGS_FILE, settings2)
-                    _append_discovery_log({
-                        "ts": ts_now,
-                        "trigger": "scheduled",
-                        "url": url,
-                        "status": status,
-                        "message": message,
-                        "found": found,
-                        "added": added,
-                        "preview": preview,
-                    })
         except Exception:
             pass
 
@@ -2216,7 +1983,10 @@ def _build_quick_leaderboard_view():
     ranked.sort(key=lambda r: r["elapsed"] if r["elapsed"] is not None else float("inf"))
     for i, r in enumerate(ranked):
         r["rank"] = i + 1
-    return {"label": "快速测试（在线检测）", "ranked": ranked, "failed": failed, "generated_at": generated_at}
+    return {
+        "label": "快速测试（模型可用性：真实调用一次模型验证，不是只测主机是否在线）",
+        "ranked": ranked, "failed": failed, "generated_at": generated_at,
+    }
 
 
 @app.get("/api/leaderboard/quick")
@@ -2226,11 +1996,11 @@ def get_quick_leaderboard(auth=Depends(require_auth)):
 
 @app.get("/api/leaderboard/export")
 def export_leaderboard(fmt: str = "csv", auth=Depends(require_auth)):
-    """把排行榜导出成 CSV 或 Markdown，方便甩给别人看而不用截图。"""
+    """把"快速测试(模型可用性)"结果导出成 CSV 或 Markdown，方便甩给别人看而不用截图。"""
     if fmt not in ("csv", "md"):
         raise HTTPException(status_code=400, detail="fmt 只支持 csv 或 md")
 
-    view = _build_leaderboard_view()
+    view = _build_quick_leaderboard_view()
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if fmt == "csv":
@@ -2239,40 +2009,30 @@ def export_leaderboard(fmt: str = "csv", auth=Depends(require_auth)):
 
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["分类", "排名", "主机", "模型", "状态", "通过/总数", "总耗时(s)", "平均耗时(s)", "最近测试时间", "错误信息"])
-        for cat, data in view.items():
-            for r in data["ranked"]:
-                writer.writerow([data["label"], r["rank"], r["host"], r["model"], r["status"],
-                                  f"{r['passed']}/{r['total']}", r["elapsed_total"], r["elapsed_avg"],
-                                  r["last_tested"], ""])
-            for r in data["failed"]:
-                writer.writerow([data["label"], "", r["host"], r["model"], r["status"],
-                                  f"{r['passed']}/{r['total']}", "", "", r["last_tested"], r.get("error") or ""])
+        writer.writerow(["排名", "主机", "模型", "可用", "响应耗时(s)", "最近测试时间"])
+        for r in view["ranked"]:
+            writer.writerow([r["rank"], r["host"], r["model"], "是", r.get("elapsed") or "", r.get("last_tested") or ""])
+        for r in view["failed"]:
+            writer.writerow(["", r["host"], r["model"], "否", "", r.get("last_tested") or ""])
         content = "\ufeff" + buf.getvalue()  # 加 BOM，避免 Excel 打开中文乱码
         media_type = "text/csv"
-        filename = f"leaderboard_{ts}.csv"
+        filename = f"leaderboard_quick_{ts}.csv"
     else:
-        lines = [f"# 模型排行榜导出（{ts}）", ""]
-        for cat, data in view.items():
-            lines.append(f"## {data['label']}")
+        lines = [f"# 模型可用性排行榜导出（{ts}）", "", f"{view['label']}", ""]
+        if view["ranked"]:
+            lines.append("| 排名 | 主机 | 模型 | 响应耗时(s) | 最近测试 |")
+            lines.append("|---|---|---|---|---|")
+            for r in view["ranked"]:
+                lines.append(f"| {r['rank']} | {r['host']} | {r['model']} | {r.get('elapsed') or ''} | {r.get('last_tested') or ''} |")
             lines.append("")
-            if data["ranked"]:
-                lines.append("| 排名 | 主机 | 模型 | 通过/总数 | 总耗时(s) | 平均耗时(s) | 最近测试 |")
-                lines.append("|---|---|---|---|---|---|---|")
-                for r in data["ranked"]:
-                    lines.append(
-                        f"| {r['rank']} | {r['host']} | {r['model']} | {r['passed']}/{r['total']} "
-                        f"| {r['elapsed_total']} | {r['elapsed_avg']} | {r['last_tested'] or ''} |"
-                    )
-                lines.append("")
-            if data["failed"]:
-                lines.append("失败/不可用：")
-                for r in data["failed"]:
-                    lines.append(f"- {r['host']} · {r['model']}：{r.get('error') or r['status']}")
-                lines.append("")
+        if view["failed"]:
+            lines.append("不可用：")
+            for r in view["failed"]:
+                lines.append(f"- {r['host']} · {r['model']}")
+            lines.append("")
         content = "\n".join(lines)
         media_type = "text/markdown"
-        filename = f"leaderboard_{ts}.md"
+        filename = f"leaderboard_quick_{ts}.md"
 
     return Response(
         content=content,
