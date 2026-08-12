@@ -569,6 +569,43 @@ code {
 .status-pill--stopping { color: var(--fail); border-color: rgba(251,93,93,0.4); background: rgba(251,93,93,0.08); }
 .status-pill--done { color: var(--signal); border-color: rgba(45,212,191,0.4); background: rgba(45,212,191,0.08); }
 
+/* ===== 扫描测试项开关（1-6，与指挥中心视图共用同一份本地存储） ===== */
+
+.scan-toggle-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.scan-toggle {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid;
+  padding: 10px 8px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s ease;
+  line-height: 1.3;
+  background: var(--panel-raised);
+}
+.scan-toggle[data-on="true"] {
+  background: rgba(45,212,191,0.12);
+  border-color: var(--signal);
+  color: var(--signal);
+}
+.scan-toggle[data-on="false"] {
+  background: rgba(251,93,93,0.06);
+  border-color: rgba(251,93,93,0.35);
+  color: var(--fail);
+  opacity: 0.8;
+}
+.scan-toggle--locked {
+  cursor: help;
+  border-style: dashed;
+}
+
 .log {
   background: #080A0C;
   border: 1px solid var(--line);
@@ -687,6 +724,7 @@ code {
 }
 
 .results-body { display: flex; flex-direction: column; gap: 14px; }
+.results-body[hidden] { display: none; }
 
 .result-card {
   border: 1px solid var(--line);
@@ -1263,61 +1301,3 @@ code {
   max-height: 240px;
   overflow-y: auto;
 }
-
-/* ===== 地址自动发现：交互式登录（远程浏览器画面）===== */
-.ad-login-modal {
-  display: none;
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  background: rgba(6, 8, 10, 0.78);
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-}
-/* 之前这里给 .ad-login-modal 直接写了 display:flex，属于"普通作者样式"，
-   优先级会盖过浏览器内置的 [hidden]{display:none} 规则——导致这个铺满全屏的
-   遮罩层从页面一加载就一直显示着、挡在最上层吞掉点击，看起来就像"点按钮没反应"。
-   现在默认 display:none，只有没有 hidden 属性时才切成 flex 显示。 */
-.ad-login-modal:not([hidden]) {
-  display: flex;
-}
-.ad-login-modal__box {
-  width: min(1320px, 100%);
-  max-height: 92vh;
-  overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 16px;
-}
-.ad-login-canvas-wrap {
-  position: relative;
-  width: 100%;
-  max-width: 1280px;
-  margin: 0 auto;
-  aspect-ratio: 1280 / 800;
-  background: #000;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.ad-login-canvas-wrap canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
-  cursor: pointer;
-}
-.ad-login-overlay-msg {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--dim);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  background: rgba(10, 13, 16, 0.55);
-  pointer-events: none;
-}
-.ad-login-overlay-msg[hidden] { display: none; }

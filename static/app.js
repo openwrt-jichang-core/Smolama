@@ -24,6 +24,27 @@ document.getElementById('themeToggle')?.addEventListener('click', () => {
   }
 });
 
+// ---------- 通用可收纳面板：点击标题旁边的按钮折叠/展开内容，状态记住在本地 ----------
+function setupCollapsible(btnId, bodyId, storageKey) {
+  const btn = document.getElementById(btnId);
+  const body = document.getElementById(bodyId);
+  if (!btn || !body) return;
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(storageKey) === '1'; } catch (e) {}
+  const apply = () => {
+    body.hidden = collapsed;
+    btn.textContent = collapsed ? '▸ 展开' : '▾ 收起';
+  };
+  apply();
+  btn.addEventListener('click', () => {
+    collapsed = !collapsed;
+    apply();
+    try { localStorage.setItem(storageKey, collapsed ? '1' : '0'); } catch (e) {}
+  });
+}
+setupCollapsible('resultsCollapseBtn', 'resultsBody', 'ollama-scanner-collapse-results');
+setupCollapsible('modelsAllCollapseBtn', 'modelsAllBody', 'ollama-scanner-collapse-modelsall');
+
 const hostForm = document.getElementById('hostForm');
 const hostInput = document.getElementById('hostInput');
 const hostList = document.getElementById('hostList');
@@ -322,6 +343,28 @@ document.getElementById('hostFailedDeleteAllBtn').addEventListener('click', asyn
   }
 });
 
+document.getElementById('hostDeleteAllBtn').addEventListener('click', async () => {
+  const count = allHostsCache.length;
+  if (!count) {
+    alert('主机列表本来就是空的。');
+    return;
+  }
+  if (!confirm(`确定要清空整个主机列表吗？会删掉全部 ${count} 条记录（正常的 + 失败区的），此操作不可撤销。`)) return;
+  const typed = prompt(`真的要删吗？这一步没法反悔。输入「删除」两个字确认（不含引号）：`);
+  if (typed !== '删除') {
+    if (typed !== null) alert('输入不匹配，已取消，主机列表没有变化。');
+    return;
+  }
+  try {
+    const res = await apiFetch('/api/hosts/all', { method: 'DELETE' });
+    const data = await res.json();
+    allHostsCache = data.hosts;
+    renderHosts(filterHostsByTag(allHostsCache));
+  } catch (e) {
+    // ignore
+  }
+});
+
 function editHostGroup(url, currentGroup) {
   const input = window.prompt('给这台主机设置一个分组名（比如：机房A / 项目X），留空清除分组', currentGroup || '');
   if (input === null) return; // 取消
@@ -482,14 +525,94 @@ batchParseBtn.addEventListener('click', async () => {
 
 // ---------- Scan control ----------
 
+// 与"🛰 指挥中心视图"共用同一份 localStorage key，两个界面切换测试选择保持一致。
+const SCAN_TOGGLE_STORAGE_KEY = 'ollama-scanner-hud-scan-toggles';
+
+function loadScanToggleState() {
+  try {
+    const raw = localStorage.getItem(SCAN_TOGGLE_STORAGE_KEY);
+    if (!raw) return { core: false, control: false, language: false, headless: false };
+    const parsed = JSON.parse(raw);
+    return {
+      core: !!parsed.core,
+      control: !!parsed.control,
+      language: !!parsed.language,
+      headless: !!parsed.headless,
+    };
+  } catch (e) {
+    return { core: false, control: false, language: false, headless: false };
+  }
+}
+
+function saveScanToggleState() {
+  try {
+    localStorage.setItem(SCAN_TOGGLE_STORAGE_KEY, JSON.stringify(scanToggleState));
+  } catch (e) {
+    // 存储不可用（隐私模式等）就算了，不影响本次会话内正常使用
+  }
+}
+
+const scanToggleState = loadScanToggleState();
+
+document.querySelectorAll('.scan-toggle[data-toggle]').forEach((btn) => {
+  const key = btn.dataset.toggle;
+  if (key === 'core' || key === 'control' || key === 'language' || key === 'headless') {
+    btn.dataset.on = String(scanToggleState[key]);
+  }
+});
+
+function syncMasterScanToggle() {
+  const allOn = scanToggleState.core && scanToggleState.control && scanToggleState.language && scanToggleState.headless;
+  document.querySelector('.scan-toggle[data-toggle="all"]').dataset.on = String(allOn);
+}
+
+document.querySelectorAll('.scan-toggle[data-toggle]').forEach((btn) => {
+  const key = btn.dataset.toggle;
+  if (key === 'quick') {
+    // 快速在线测试是扫描流水线的第一步（先探测模型可用性，后面的测试都依赖这一步的
+    // 结果），不能单独关闭，点击时解释一下，而不是让它看起来像个卡死的按钮。
+    btn.addEventListener('click', () => {
+      alert('"快速在线测试"是扫描流程的第一步：先探测每个模型是否可用，后面第 3/4/5/6 项测试都要依赖这一步的结果来决定测哪些模型。\n\n所以它不能单独关闭；如果这次扫描只想测在线状态、不想跑更深的测试，把下面 3/4/5/6 全部关掉（红色）再开始扫描就行。');
+    });
+    return;
+  }
+  btn.addEventListener('click', () => {
+    if (key === 'all') {
+      const turnOn = btn.dataset.on !== 'true';
+      ['core', 'control', 'language', 'headless'].forEach((k) => {
+        scanToggleState[k] = turnOn;
+        document.querySelector(`.scan-toggle[data-toggle="${k}"]`).dataset.on = String(turnOn);
+      });
+      btn.dataset.on = String(turnOn);
+      saveScanToggleState();
+      return;
+    }
+    scanToggleState[key] = !scanToggleState[key];
+    btn.dataset.on = String(scanToggleState[key]);
+    syncMasterScanToggle();
+    saveScanToggleState();
+  });
+});
+syncMasterScanToggle();
+
 async function startScan() {
+  const anyDeepTestOn = scanToggleState.core || scanToggleState.control || scanToggleState.language || scanToggleState.headless;
+  if (!anyDeepTestOn) {
+    const ok = confirm('当前 3/4/5/6 测试开关都是关闭(红)状态，本次只会跑"快速在线测试"。\n\n确定要这样开始吗？');
+    if (!ok) return;
+  }
   const concurrency = clampConcurrency(concurrencyNumber.value);
   const model_concurrency = clampModelConcurrency(modelConcurrencyNumber.value);
-  const enable_headless = document.getElementById('enableHeadlessCheck')?.checked || false;
   const res = await apiFetch('/api/scan/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ concurrency, model_concurrency, enable_headless }),
+    body: JSON.stringify({
+      concurrency, model_concurrency,
+      enable_core: scanToggleState.core,
+      enable_control: scanToggleState.control,
+      enable_language: scanToggleState.language,
+      enable_headless: scanToggleState.headless,
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -703,142 +826,38 @@ async function pingModel(hostUrl, model, btnEl) {
   }
 }
 
-// ---------- Leaderboard table (三分类: core / control / language) ----------
+// ---------- Leaderboard table（精简版：只做"模型是否可用"的快速测试排行） ----------
 
-let lbActiveCategory = 'core';
-let lbLastData = null;
-let lbMode = 'deep'; // 'deep' | 'quick'
 let lbQuickData = null;
-
-const lbTabs = document.querySelectorAll('.lb-tabs .lb-tab');
-const lbModeButtons = document.querySelectorAll('.lb-mode-toggle .lb-tab');
-const lbDeepOnlyEls = [document.getElementById('lbDeepOnly'), document.getElementById('lbTrendSection')];
 const lbRankedTitle = document.getElementById('lbRankedTitle');
-
-lbModeButtons.forEach((btn) => {
-  btn.addEventListener('click', () => {
-    lbMode = btn.dataset.mode;
-    lbModeButtons.forEach((b) => b.classList.toggle('is-active', b === btn));
-    lbDeepOnlyEls.forEach((el) => { if (el) el.style.display = lbMode === 'quick' ? 'none' : ''; });
-    refreshLeaderboardTable();
-  });
-});
-
-lbTabs.forEach((tab) => {
-  tab.addEventListener('click', () => {
-    lbActiveCategory = tab.dataset.cat;
-    lbTabs.forEach((t) => t.classList.toggle('is-active', t === tab));
-    renderActiveCategory();
-    loadTrendChart();
-  });
-});
-
-const trendRangeSelect = document.getElementById('trendRangeSelect');
-const trendChartEl = document.getElementById('trendChart');
-trendRangeSelect.addEventListener('change', loadTrendChart);
-
-const TREND_METRIC_COLORS = {
-  ranked_count: '#2dd4bf',
-  avg_elapsed: '#facc15',
-};
-
-async function loadTrendChart() {
-  try {
-    const days = trendRangeSelect.value;
-    const res = await apiFetch(`/api/history?days=${days}`);
-    const records = await res.json();
-    renderTrendChart(records);
-  } catch (e) {
-    // apiFetch 已处理鉴权跳转
-  }
-}
-
-function renderTrendChart(records) {
-  const points = (records || [])
-    .map((r) => ({ ts: r.ts, cat: (r.categories || {})[lbActiveCategory] }))
-    .filter((p) => p.cat);
-
-  if (!points.length) {
-    trendChartEl.innerHTML = '<p class="results-empty">暂无历史趋势数据，跑几次扫描后会自动出现。</p>';
-    return;
-  }
-
-  const width = 640;
-  const height = 160;
-  const padding = 24;
-  const maxRanked = Math.max(1, ...points.map((p) => p.cat.ranked_count || 0));
-  const maxElapsed = Math.max(1, ...points.map((p) => p.cat.avg_elapsed || 0));
-
-  function pathFor(getVal, maxVal) {
-    return points
-      .map((p, i) => {
-        const x = padding + (i / Math.max(1, points.length - 1)) * (width - padding * 2);
-        const v = getVal(p.cat) || 0;
-        const y = height - padding - (v / maxVal) * (height - padding * 2);
-        return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-      })
-      .join(' ');
-  }
-
-  const rankedPath = pathFor((c) => c.ranked_count, maxRanked);
-  const elapsedPath = pathFor((c) => c.avg_elapsed, maxElapsed);
-
-  trendChartEl.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="历史趋势图">
-      <line x1="${padding}" y1="${height - padding}" x2="${width - padding}" y2="${height - padding}" stroke="var(--line)" stroke-width="1" />
-      <path d="${rankedPath}" fill="none" stroke="${TREND_METRIC_COLORS.ranked_count}" stroke-width="2" />
-      <path d="${elapsedPath}" fill="none" stroke="${TREND_METRIC_COLORS.avg_elapsed}" stroke-width="2" />
-    </svg>
-    <div class="trend-legend">
-      <span><i style="background:${TREND_METRIC_COLORS.ranked_count}"></i>上榜数量（最高 ${maxRanked}）</span>
-      <span><i style="background:${TREND_METRIC_COLORS.avg_elapsed}"></i>平均耗时秒（最高 ${maxElapsed.toFixed(1)}s）</span>
-      <span>${points[0].ts.slice(0, 10)} ~ ${points[points.length - 1].ts.slice(0, 10)}，共 ${points.length} 个点</span>
-    </div>
-  `;
-}
 
 async function refreshLeaderboardTable() {
   try {
-    if (lbMode === 'quick') {
-      const res = await apiFetch('/api/leaderboard/quick');
-      lbQuickData = await res.json();
-      renderActiveCategory();
-    } else {
-      const res = await apiFetch('/api/leaderboard');
-      lbLastData = await res.json();
-      renderActiveCategory();
-      loadTrendChart();
-    }
+    const res = await apiFetch('/api/leaderboard/quick');
+    lbQuickData = await res.json();
+    renderActiveCategory();
   } catch (e) {
     // ignore, apiFetch already handles auth redirect
   }
 }
 
 function renderActiveCategory() {
-  if (lbMode === 'quick') {
-    if (!lbQuickData) return;
-    lbRankedTitle.textContent = `⚡ ${lbQuickData.label}（在线优先，按响应速度排序）`;
-    renderQuickTable(lbRanked, lbQuickData.ranked, true);
-    renderQuickTable(lbFailed, lbQuickData.failed, false);
-    return;
-  }
-  if (!lbLastData) return;
-  const catData = lbLastData[lbActiveCategory] || { label: '', ranked: [], failed: [] };
-  lbRankedTitle.textContent = `排行榜（${catData.label || ''} · 全部通过）`;
-  renderLbTable(lbRanked, catData.ranked, true);
-  renderLbTable(lbFailed, catData.failed, false);
+  if (!lbQuickData) return;
+  lbRankedTitle.textContent = `排行榜（可用 · 按响应耗时排序）`;
+  renderQuickTable(lbRanked, lbQuickData.ranked, true);
+  renderQuickTable(lbFailed, lbQuickData.failed, false);
 }
 
 function renderQuickTable(container, entries, ranked) {
   if (!entries || !entries.length) {
-    container.innerHTML = `<p class="results-empty">${ranked ? '暂无在线模型。' : '暂无离线记录。'}</p>`;
+    container.innerHTML = `<p class="results-empty">${ranked ? '暂无可用模型。' : '暂无不可用记录。'}</p>`;
     return;
   }
   container.innerHTML = '';
   entries.forEach((entry) => {
     const row = document.createElement('div');
     row.className = `lb-row${ranked ? '' : ' lb-row--fail'}`;
-    const statsHtml = ranked ? `<strong>${entry.elapsed ?? '?'}s</strong> 响应耗时` : '离线/无响应';
+    const statsHtml = ranked ? `<strong>${entry.elapsed ?? '?'}s</strong> 响应耗时` : '不可用';
     const familyHint = entry.family_hint
       ? `<div class="lb-row__family">参考系列: ${escapeHtml(entry.family_hint)}</div>`
       : '';
@@ -956,6 +975,14 @@ async function loadSettingsIntoForm() {
     document.getElementById('histRetentionDays').value = hist.retention_days ?? 180;
     document.getElementById('histMaxSizeMb').value = hist.max_size_mb ?? 50;
     document.getElementById('histAutoCleanup').checked = hist.auto_cleanup_enabled !== false;
+
+    const ad = s.address_discovery || {};
+    document.getElementById('adEnabled').checked = !!ad.enabled;
+    document.getElementById('adUrl').value = ad.url || '';
+    document.getElementById('adInterval').value = ad.interval_minutes ?? 30;
+    document.getElementById('adGroup').value = ad.group || '';
+    document.getElementById('adTags').value = (ad.tags || []).join(',');
+    renderAddressDiscoveryStatus(ad);
   } catch (e) {
     // ignore, apiFetch already handles auth redirect
   }
@@ -1022,6 +1049,17 @@ settingsSaveBtn.addEventListener('click', async () => {
       settingsStatus.textContent = `保存失败：${err.detail || res.status}`;
       return;
     }
+    const adRes = await apiFetch('/api/settings/address-discovery', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(buildAddressDiscoveryPayload()),
+    });
+    if (!adRes.ok) {
+      const err = await adRes.json().catch(() => ({}));
+      settingsStatus.textContent = `地址自动发现保存失败：${err.detail || adRes.status}`;
+      return;
+    }
+    renderAddressDiscoveryStatus(await adRes.json());
     settingsStatus.textContent = '已保存 ✓';
     setTimeout(() => { settingsStatus.textContent = ''; }, 3000);
   } catch (e) {
@@ -1029,19 +1067,7 @@ settingsSaveBtn.addEventListener('click', async () => {
   }
 });
 
-// ---------- 地址自动发现（独立面板，不再挂在设置里） ----------
-
-const adSaveBtn = document.getElementById('adSaveBtn');
-const adTestBtn = document.getElementById('adTestBtn');
-const adStatus = document.getElementById('adStatus');
-const adLogList = document.getElementById('adLogList');
-const adLogEmpty = document.getElementById('adLogEmpty');
-const adLogRefreshBtn = document.getElementById('adLogRefreshBtn');
-const adLogClearBtn = document.getElementById('adLogClearBtn');
-const adLogAutoRefresh = document.getElementById('adLogAutoRefresh');
-
-const AD_STATUS_ICON = { ok: '✅', cf_blocked: '🛡️ 被拦截', need_login: '🔒 需要重新登录', error: '❌' };
-const AD_TRIGGER_LABEL = { manual: '手动测试', scheduled: '定时触发' };
+// ---------- 地址自动发现 ----------
 
 function buildAddressDiscoveryPayload() {
   return {
@@ -1050,66 +1076,28 @@ function buildAddressDiscoveryPayload() {
     interval_minutes: parseInt(document.getElementById('adInterval').value, 10) || 30,
     group: document.getElementById('adGroup').value.trim(),
     tags: document.getElementById('adTags').value.split(',').map((t) => t.trim()).filter(Boolean),
-    login_url: document.getElementById('adLoginUrl').value.trim(),
   };
 }
 
-function renderAdAuthStatus(ad) {
-  const el = document.getElementById('adAuthStatus');
-  if (!ad.cookies_saved_at) {
-    el.textContent = '还没有保存过登录 Cookie（如果目标网页不需要登录，可以不管这一块）。';
+function renderAddressDiscoveryStatus(ad) {
+  const box = document.getElementById('adStatus');
+  if (!ad || !ad.last_run_at) {
+    box.textContent = '还没有运行过。';
     return;
   }
-  if (ad.auth_status === 'need_login') {
-    el.innerHTML = `⚠️ 登录状态已失效（上次保存于 ${escapeHtml(ad.cookies_saved_at)}），请重新点「开始交互式登录」。`;
-  } else {
-    el.innerHTML = `✅ 已保存登录状态（${escapeHtml(ad.cookies_saved_at)}，登录页：${escapeHtml(ad.cookies_login_url || '')}）`;
-  }
+  const icon = { ok: '✅', cf_blocked: '🛡️ 被拦截', error: '❌' }[ad.last_status] || '';
+  const foundText = (ad.last_found || []).length ? `（${(ad.last_found || []).join(', ')}）` : '';
+  box.innerHTML = `上次运行：${escapeHtml(ad.last_run_at)} ${icon}<br/>${escapeHtml(ad.last_message || '')}${foundText ? '<br/>' + escapeHtml(foundText) : ''}`;
 }
 
-async function loadAddressDiscoveryIntoForm() {
-  try {
-    const res = await apiFetch('/api/settings/address-discovery');
-    const ad = await res.json();
-    document.getElementById('adEnabled').checked = !!ad.enabled;
-    document.getElementById('adUrl').value = ad.url || '';
-    document.getElementById('adInterval').value = ad.interval_minutes ?? 30;
-    document.getElementById('adGroup').value = ad.group || '';
-    document.getElementById('adTags').value = (ad.tags || []).join(',');
-    document.getElementById('adLoginUrl').value = ad.login_url || '';
-    renderAdAuthStatus(ad);
-  } catch (e) {
-    // ignore, apiFetch already handles auth redirect
-  }
-}
-
-adSaveBtn.addEventListener('click', async () => {
-  adStatus.textContent = '保存中…';
-  try {
-    const res = await apiFetch('/api/settings/address-discovery', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildAddressDiscoveryPayload()),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      adStatus.textContent = `保存失败：${data.detail || res.status}`;
-      return;
-    }
-    adStatus.textContent = '已保存 ✓';
-    setTimeout(() => { adStatus.textContent = ''; }, 3000);
-  } catch (e) {
-    adStatus.textContent = '保存失败，请检查网络';
-  }
-});
-
-adTestBtn.addEventListener('click', async () => {
+document.getElementById('adTestBtn').addEventListener('click', async () => {
+  const box = document.getElementById('adStatus');
   const url = document.getElementById('adUrl').value.trim();
   if (!url) {
-    adStatus.textContent = '先填一下目标网址。';
+    box.textContent = '先填一下目标网址。';
     return;
   }
-  adStatus.textContent = '测试中…（先保存一下当前配置，再实际发一次请求，最多等 10 秒左右）';
+  box.textContent = '测试中…（先保存一下当前配置，再实际发一次请求，最多等 10 秒左右）';
   try {
     const saveRes = await apiFetch('/api/settings/address-discovery', {
       method: 'PUT',
@@ -1118,240 +1106,22 @@ adTestBtn.addEventListener('click', async () => {
     });
     if (!saveRes.ok) {
       const err = await saveRes.json().catch(() => ({}));
-      adStatus.textContent = `保存配置失败：${err.detail || saveRes.status}`;
+      box.textContent = `保存配置失败：${err.detail || saveRes.status}`;
       return;
     }
     const res = await apiFetch('/api/settings/address-discovery/test', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) {
-      adStatus.textContent = `测试失败：${data.detail || res.status}`;
+      box.textContent = `测试失败：${data.detail || res.status}`;
       return;
     }
-    const icon = AD_STATUS_ICON[data.status] || '';
+    const icon = { ok: '✅', cf_blocked: '🛡️ 被拦截', error: '❌' }[data.status] || '';
     const foundText = (data.found || []).length ? `<br/>提取到：${escapeHtml(data.found.join(', '))}` : '';
-    adStatus.innerHTML = `${icon} ${escapeHtml(data.message || '')}${foundText}`;
-    refreshAddressDiscoveryLog();
+    box.innerHTML = `${icon} ${escapeHtml(data.message || '')}${foundText}`;
   } catch (e) {
-    adStatus.textContent = '测试失败，请检查网络';
+    box.textContent = '测试失败，请检查网络';
   }
 });
-
-function renderAddressDiscoveryLog(logs) {
-  adLogEmpty.style.display = logs.length ? 'none' : 'block';
-  adLogList.innerHTML = logs.map((l) => {
-    const icon = AD_STATUS_ICON[l.status] || '';
-    const triggerLabel = AD_TRIGGER_LABEL[l.trigger] || l.trigger || '';
-    const foundText = (l.found || []).length
-      ? `提取到 ${l.found.length} 个：${escapeHtml(l.found.join(', '))}`
-      : '没有提取到地址';
-    const addedText = l.added ? `，新增 ${l.added} 个主机` : '';
-    const previewText = l.preview
-      ? `<div class="audit-row__detail" style="opacity:.7;">抓到的内容预览：${escapeHtml(l.preview)}</div>`
-      : '';
-    return `
-      <div class="audit-row">
-        <span class="audit-row__ts">${escapeHtml(l.ts)}</span>
-        <span class="audit-row__action">${icon} ${escapeHtml(triggerLabel)}</span>
-        <span class="audit-row__ip">${escapeHtml(l.url || '')}</span>
-        <span class="audit-row__detail">
-          ${escapeHtml(l.message || '')}<br/>
-          ${foundText}${addedText}
-          ${previewText}
-        </span>
-      </div>
-    `;
-  }).join('');
-}
-
-async function refreshAddressDiscoveryLog() {
-  try {
-    const res = await apiFetch('/api/settings/address-discovery/log?limit=100');
-    const data = await res.json();
-    renderAddressDiscoveryLog(data.logs || []);
-  } catch (e) {
-    // ignore, apiFetch already handles auth redirect
-  }
-}
-
-adLogRefreshBtn.addEventListener('click', refreshAddressDiscoveryLog);
-
-adLogClearBtn.addEventListener('click', async () => {
-  if (!confirm('确定要清空全部运行记录吗？这个操作无法撤销。')) return;
-  try {
-    await apiFetch('/api/settings/address-discovery/log', { method: 'DELETE' });
-    refreshAddressDiscoveryLog();
-  } catch (e) {
-    // ignore
-  }
-});
-
-// 每 15 秒自动拉一次记录，保证定时触发（后台每 20 秒轮询一次）产生的新记录不用手动刷新也能看到；
-// 页面刷新/重新打开时也会先走一次 refreshAddressDiscoveryLog，所以历史记录不依赖这个定时器。
-setInterval(() => {
-  if (adLogAutoRefresh.checked) refreshAddressDiscoveryLog();
-}, 15000);
-
-// ---------------------------------------------------------------------------
-// 交互式登录：打开远程浏览器画面，账号密码/验证框都在自己这边操作，
-// 完成后只保存 Cookie，不需要手动复制粘贴任何 Cookie 字符串。
-// ---------------------------------------------------------------------------
-(function setupInteractiveLogin() {
-  const startBtn = document.getElementById('adLoginStartBtn');
-  const cancelBtn = document.getElementById('adLoginCancelBtn');
-  const finishBtn = document.getElementById('adLoginFinishBtn');
-  const modal = document.getElementById('adLoginModal');
-  const canvas = document.getElementById('adLoginCanvas');
-  const overlayMsg = document.getElementById('adLoginOverlayMsg');
-  const modalStatus = document.getElementById('adLoginModalStatus');
-  const ctx = canvas.getContext('2d');
-  const frameImg = new Image();
-  frameImg.onload = () => {
-    ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
-  };
-
-  let ws = null;
-  let sessionId = null;
-  let pingTimer = null;
-
-  function setOverlay(text) {
-    if (text) {
-      overlayMsg.textContent = text;
-      overlayMsg.hidden = false;
-    } else {
-      overlayMsg.hidden = true;
-    }
-  }
-
-  function closeModal() {
-    modal.hidden = true;
-    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
-    sessionId = null;
-  }
-
-  function canvasEventToPoint(evt) {
-    const rect = canvas.getBoundingClientRect();
-    const scaleX = canvas.width / rect.width;
-    const scaleY = canvas.height / rect.height;
-    return {
-      x: (evt.clientX - rect.left) * scaleX,
-      y: (evt.clientY - rect.top) * scaleY,
-    };
-  }
-
-  canvas.addEventListener('click', (evt) => {
-    canvas.focus();
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const p = canvasEventToPoint(evt);
-    ws.send(JSON.stringify({ type: 'click', x: p.x, y: p.y }));
-  });
-
-  canvas.addEventListener('wheel', (evt) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    evt.preventDefault();
-    ws.send(JSON.stringify({ type: 'scroll', dx: evt.deltaX, dy: evt.deltaY }));
-  }, { passive: false });
-
-  canvas.setAttribute('tabindex', '0');
-  canvas.addEventListener('keydown', (evt) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    // 阻止默认行为（比如空格滚动页面、Tab 跳出画布），把按键转发给远程浏览器。
-    evt.preventDefault();
-    ws.send(JSON.stringify({ type: 'key', key: evt.key }));
-  });
-
-  startBtn.addEventListener('click', async () => {
-    const loginUrl = document.getElementById('adLoginUrl').value.trim();
-    if (!loginUrl) {
-      adStatus.textContent = '先填一下登录页地址。';
-      return;
-    }
-    // 先把当前配置（包括登录页地址）保存一下，免得白填。
-    try {
-      await apiFetch('/api/settings/address-discovery', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildAddressDiscoveryPayload()),
-      });
-    } catch (e) { /* 保存失败也不阻塞打开远程浏览器 */ }
-
-    modal.hidden = false;
-    setOverlay('正在启动远程浏览器…');
-    modalStatus.textContent = '';
-    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
-
-    const username = document.getElementById('adLoginUsername').value;
-    const password = document.getElementById('adLoginPassword').value;
-    try {
-      const res = await apiFetch('/api/settings/address-discovery/interactive-login/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ login_url: loginUrl, username, password }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setOverlay(`启动失败：${data.detail || res.status}`);
-        return;
-      }
-      sessionId = data.session_id;
-    } catch (e) {
-      setOverlay('启动失败，请检查网络');
-      return;
-    }
-
-    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${wsProto}//${location.host}/ws/interactive-login/${sessionId}`);
-    ws.onopen = () => {
-      setOverlay('已连接，等待画面…');
-      pingTimer = setInterval(() => {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
-      }, 15000);
-    };
-    ws.onmessage = (evt) => {
-      let msg;
-      try { msg = JSON.parse(evt.data); } catch (e) { return; }
-      if (msg.type === 'frame') {
-        setOverlay('');
-        frameImg.src = `data:image/jpeg;base64,${msg.data}`;
-      } else if (msg.type === 'status' && msg.status === 'error') {
-        setOverlay(`远程浏览器出错：${msg.error || ''}`);
-      }
-    };
-    ws.onerror = () => {
-      modalStatus.textContent = '连接出了点问题…';
-    };
-    ws.onclose = () => {
-      if (!modal.hidden) modalStatus.textContent = '连接已断开（可能是会话超时），可以关闭重新开始。';
-    };
-  });
-
-  cancelBtn.addEventListener('click', async () => {
-    if (sessionId) {
-      try {
-        await apiFetch(`/api/settings/address-discovery/interactive-login/${sessionId}/cancel`, { method: 'POST' });
-      } catch (e) { /* ignore */ }
-    }
-    closeModal();
-  });
-
-  finishBtn.addEventListener('click', async () => {
-    if (!sessionId) { closeModal(); return; }
-    modalStatus.textContent = '正在保存登录状态…';
-    try {
-      const res = await apiFetch(`/api/settings/address-discovery/interactive-login/${sessionId}/finish`, { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok) {
-        modalStatus.textContent = `保存失败：${data.detail || res.status}`;
-        return;
-      }
-      closeModal();
-      adStatus.textContent = `登录状态已保存（${data.cookie_count} 个 Cookie）✓`;
-      loadAddressDiscoveryIntoForm();
-    } catch (e) {
-      modalStatus.textContent = '保存失败，请检查网络';
-    }
-  });
-})();
 
 // ---------- 历史趋势数据：文件大小/条数展示 + 按天数删除 ----------
 
@@ -1378,7 +1148,6 @@ async function deleteHistory(mode, days) {
       body: JSON.stringify(mode === 'all' ? { mode: 'all' } : { mode: 'days', days }),
     });
     await refreshHistoryStats();
-    await loadTrendChart();
   } catch (e) {
     // apiFetch 已处理鉴权跳转
   }
@@ -1843,6 +1612,7 @@ document.getElementById('archiveCreateBtn').addEventListener('click', async () =
 
 const modelsAllList = document.getElementById('modelsAllList');
 let modelsAllCache = [];
+let modelsAllShowArchived = false;
 
 async function refreshModelsAll() {
   try {
@@ -1855,12 +1625,21 @@ async function refreshModelsAll() {
 }
 
 function renderModelsAll() {
-  if (!modelsAllCache.length) {
-    modelsAllList.innerHTML = '<p class="results-empty">还没有扫描到任何模型。</p>';
+  const archivedCount = modelsAllCache.filter((m) => m.source === 'archive').length;
+  const showArchivedBtn = document.getElementById('modelsAllShowArchivedBtn');
+  showArchivedBtn.style.display = archivedCount ? '' : 'none';
+  showArchivedBtn.textContent = modelsAllShowArchived
+    ? `📦 隐藏归档中的记录（${archivedCount} 条）`
+    : `📦 显示归档中的记录（${archivedCount} 条已隐藏）`;
+
+  const visible = modelsAllShowArchived ? modelsAllCache : modelsAllCache.filter((m) => m.source !== 'archive');
+
+  if (!visible.length) {
+    modelsAllList.innerHTML = `<p class="results-empty">${modelsAllCache.length ? '当前工作区暂无记录，点上面按钮查看归档里的。' : '还没有扫描到任何模型。'}</p>`;
     return;
   }
   modelsAllList.innerHTML = '';
-  modelsAllCache.forEach((m) => {
+  visible.forEach((m) => {
     const row = document.createElement('div');
     row.className = 'lb-row';
     row.dataset.host = m.host;
@@ -1877,6 +1656,11 @@ function renderModelsAll() {
     modelsAllList.appendChild(row);
   });
 }
+
+document.getElementById('modelsAllShowArchivedBtn').addEventListener('click', () => {
+  modelsAllShowArchived = !modelsAllShowArchived;
+  renderModelsAll();
+});
 
 document.getElementById('modelsAllRefreshBtn').addEventListener('click', refreshModelsAll);
 
@@ -1930,8 +1714,6 @@ async function init() {
   await fetchHosts();
   refreshArchives();
   refreshModelsAll();
-  loadAddressDiscoveryIntoForm();
-  refreshAddressDiscoveryLog();
   try {
     const res = await apiFetch('/api/scan/status?since=0');
     const data = await res.json();

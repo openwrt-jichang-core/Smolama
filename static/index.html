@@ -44,6 +44,7 @@
         <input type="text" id="hostTagFilter" class="host-form__input" placeholder="按标签筛选，例如：机房A（留空显示全部）" autocomplete="off" />
         <button type="button" id="hostEnableAllBtn" class="btn">✅ 全部启用</button>
         <button type="button" id="hostDisableAllBtn" class="btn">⛔ 全部禁用</button>
+        <button type="button" id="hostDeleteAllBtn" class="btn btn--danger" title="清空整个主机列表，不可撤销">🗑️ 一键删除全部主机</button>
       </div>
 
       <form id="hostForm" class="host-form">
@@ -120,22 +121,27 @@
         </div>
       </div>
 
-      <div class="concurrency">
-        <label class="settings-checkbox">
-          <input type="checkbox" id="enableHeadlessCheck" />
-          🌐 本次扫描包含"无头浏览器测试"
-          <span class="concurrency__hint">— 新增的测试类型，检测模型能否正确编排跳转/点击/取文本这类浏览器工具调用；比其它测试更耗时，默认不勾选。深度测试排行榜会多出对应分类。</span>
-        </label>
+      <div class="scan-toggle-grid">
+        <button type="button" class="scan-toggle" data-toggle="all" data-on="false">1 全部功能测试</button>
+        <button type="button" class="scan-toggle scan-toggle--locked" data-toggle="quick" data-on="true" title="点击查看为什么这个测试不能关闭">🔒 2 快速在线测试</button>
+        <button type="button" class="scan-toggle" data-toggle="core" data-on="false">3 核心测试</button>
+        <button type="button" class="scan-toggle" data-toggle="control" data-on="false">4 控制性测试</button>
+        <button type="button" class="scan-toggle" data-toggle="language" data-on="false">5 语言测试</button>
+        <button type="button" class="scan-toggle" data-toggle="headless" data-on="false">6 🌐无头浏览器</button>
       </div>
+      <p class="panel__hint">绿色 = 本次扫描会跑，红色 = 跳过，点一下切换。这份选择跟"🛰 指挥中心视图"是共用的（同一份本地存储），两边切换互不影响彼此的选择。</p>
 
       <div id="log" class="log" role="log" aria-live="polite"></div>
     </section>
 
     <!-- 结果面板 -->
     <section class="panel panel--results" aria-labelledby="resultsTitle">
-      <h2 id="resultsTitle" class="panel__title">
-        <span class="panel__index">03</span> 测试结果
-      </h2>
+      <div class="console-head">
+        <h2 id="resultsTitle" class="panel__title">
+          <span class="panel__index">03</span> 测试结果
+        </h2>
+        <button type="button" id="resultsCollapseBtn" class="btn" title="收起/展开">▾ 收起</button>
+      </div>
       <div id="resultsBody" class="results-body">
         <p class="results-empty">暂无结果，运行一次扫描后将显示各模型的测试通过情况。</p>
       </div>
@@ -152,25 +158,9 @@
         <button id="lbExportMd" class="btn" title="导出为Markdown，方便发给别人看">⇩ 导出MD</button>
       </div>
       <p class="panel__hint">
-        三个维度分开排名：<strong>核心测试</strong>考代码正确性与速度；<strong>控制性</strong>用标准
-        tool-calling 协议（同 Hermes Agent / OpenClaw 驱动模型的方式）验证模型是否真的调用工具完成了文件读写，
-        而不是嘴上说说；<strong>语言性</strong>考纯文本输出是否严格符合格式/字数/关键词等客观要求。
-        每个维度内只有全部通过才参与排名（按总耗时升序），有失败项的只额外记录。
+        只测一件事：<strong>这个模型现在能不能正常用</strong>——真的往它身上发一次生成请求（不是只 ping 一下主机端口），
+        能正常回应就算"可用"，报错/超时/连不上都算"不可用"，按响应耗时从快到慢排序。
       </p>
-
-      <div class="lb-mode-toggle" role="tablist">
-        <button type="button" class="lb-tab is-active" data-mode="deep" role="tab">🔬 深度测试</button>
-        <button type="button" class="lb-tab" data-mode="quick" role="tab">⚡ 快速测试（仅检测在线/响应速度）</button>
-      </div>
-
-      <div id="lbDeepOnly">
-        <div class="lb-tabs" role="tablist">
-          <button type="button" class="lb-tab is-active" data-cat="core" role="tab">核心测试</button>
-          <button type="button" class="lb-tab" data-cat="control" role="tab">控制性 (Agent工具调用)</button>
-          <button type="button" class="lb-tab" data-cat="language" role="tab">语言性</button>
-          <button type="button" class="lb-tab" data-cat="headless" role="tab">🌐 无头浏览器</button>
-        </div>
-      </div>
 
       <div class="leaderboard-layout">
         <!-- 左侧：已添加链接 + 每个模型的连通性状态 -->
@@ -191,32 +181,15 @@
         <!-- 右侧：排行榜表格 -->
         <div class="lb-main">
           <div class="lb-section">
-            <h3 id="lbRankedTitle" class="lb-section__title">排行榜（全部通过）</h3>
+            <h3 id="lbRankedTitle" class="lb-section__title">排行榜（可用）</h3>
             <div id="lbRanked" class="lb-table">
               <p class="results-empty">暂无排名数据。</p>
             </div>
           </div>
           <div class="lb-section">
-            <h3 class="lb-section__title">失败记录（不参与排名）</h3>
+            <h3 class="lb-section__title">不可用</h3>
             <div id="lbFailed" class="lb-table">
-              <p class="results-empty">暂无失败记录。</p>
-            </div>
-          </div>
-
-          <div class="lb-section" id="lbTrendSection">
-            <h3 class="lb-section__title">历史趋势（当前分类）</h3>
-            <div class="settings-row">
-              <label class="settings-field">时间范围
-                <select id="trendRangeSelect">
-                  <option value="30">最近30天</option>
-                  <option value="90" selected>最近90天</option>
-                  <option value="180">最近180天</option>
-                  <option value="0">全部</option>
-                </select>
-              </label>
-            </div>
-            <div id="trendChart" class="trend-chart">
-              <p class="results-empty">暂无历史趋势数据，跑几次扫描后会自动出现。</p>
+              <p class="results-empty">暂无记录。</p>
             </div>
           </div>
         </div>
@@ -260,6 +233,35 @@
             <input type="number" id="schedModelConcurrency" min="1" max="20" value="4" />
           </label>
         </div>
+      </div>
+
+      <div class="settings-block">
+        <h3 class="settings-block__title">地址自动发现（从网页提取）</h3>
+        <p class="panel__hint">
+          定期访问一个网页（自己的域名或局域网地址都行），从返回内容里提取 <code>ip:port</code>（没写端口默认按 11434），自动加进主机列表。
+          适合"内网地址会变、通过网站中转上报当前地址"这种场景。<br/>
+          <b>如果目标域名开了 Cloudflare 防护：</b>这里发的是普通 HTTP 请求，没法执行 JS，过不了 CF 的验证挑战页——这不是能靠改代码绕过的事。
+          建议去 Cloudflare 后台给本服务器出口IP或这个路径加一条"跳过安全检查"的规则，或者把这个页面放在一个不接入CF代理（DNS-only/灰色云朵）的子域名下。
+        </p>
+        <div class="settings-row">
+          <label class="settings-checkbox"><input type="checkbox" id="adEnabled" /> 启用地址自动发现</label>
+          <label class="settings-field" style="flex:2;">目标网址
+            <input type="text" id="adUrl" placeholder="https://briwanglu.com/status 或 http://192.168.113.9" />
+          </label>
+          <label class="settings-field">检查间隔（分钟）
+            <input type="number" id="adInterval" min="5" value="30" />
+          </label>
+        </div>
+        <div class="settings-row">
+          <label class="settings-field">分组（可选）
+            <input type="text" id="adGroup" placeholder="给自动发现的主机打个分组" />
+          </label>
+          <label class="settings-field" style="flex:2;">标签（可选，逗号分隔）
+            <input type="text" id="adTags" placeholder="例如：自动发现,家庭" />
+          </label>
+          <button type="button" id="adTestBtn" class="btn">🔍 立即测试</button>
+        </div>
+        <div id="adStatus" class="panel__hint" style="margin-top:4px;"></div>
       </div>
 
       <div class="settings-block">
@@ -422,109 +424,20 @@
 
     <!-- 模型汇总 -->
     <section class="panel" aria-labelledby="modelsAllTitle">
-      <h2 id="modelsAllTitle" class="panel__title"><span class="panel__index">08</span> 模型汇总（含归档）</h2>
-      <p class="panel__hint">不管是当前工作区还是躺在归档里的记录，扫描到过的 主机+模型 都汇总在这一个列表，方便"恢复测试"——有些机器可能只是被你归档整理掉了，其实还在线。</p>
-      <div class="settings-row">
-        <button id="modelsAllRefreshBtn" class="btn">🔄 刷新列表</button>
-        <button id="modelsAllQuickTestBtn" class="btn btn--add">⚡ 一键测试全部在线状态</button>
-        <button id="modelsAllHeadlessTestBtn" class="btn">🌐 一键测试无头浏览器支持（仅在线的）</button>
-      </div>
-      <div id="modelsAllList" class="lb-table"></div>
-    </section>
-    <!-- 地址自动发现 -->
-    <section class="panel" id="addressDiscoveryPanel" aria-labelledby="addressDiscoveryTitle">
       <div class="console-head">
-        <h2 id="addressDiscoveryTitle" class="panel__title">
-          <span class="panel__index">09</span> 地址自动发现（从网页提取）
-        </h2>
-        <button id="adSaveBtn" class="btn btn--add">💾 保存</button>
+        <h2 id="modelsAllTitle" class="panel__title"><span class="panel__index">08</span> 模型汇总（含归档）</h2>
+        <button type="button" id="modelsAllCollapseBtn" class="btn" title="收起/展开">▾ 收起</button>
       </div>
-      <p class="panel__hint">
-        定期访问一个网页（自己的域名或局域网地址都行），从返回内容里提取 <code>ip:port</code>（没写端口默认按 11434），自动加进主机列表。
-        适合"内网地址会变、通过网站中转上报当前地址"这种场景。<br/>
-        <b>如果目标域名开了 Cloudflare 防护：</b>这里发的是普通 HTTP 请求，没法执行 JS，过不了 CF 的验证挑战页——不是能靠改代码绕过的事，
-        建议去 Cloudflare 后台加白名单规则，或把页面放在不接入CF代理的子域名下。<br/>
-        <b>如果目标页面是前端框架异步渲染出来的：</b>这里发的也是普通 HTTP 请求，拿到的是渲染前的原始 HTML，看不到浏览器里"渲染完之后"才出现的文字——
-        下方每条记录都带一份"实际抓到的内容"预览，提取不到东西时可以看这个来判断是页面里真没有，还是页面本身就不是纯 HTML/文本。
-      </p>
-      <div class="settings-row">
-        <label class="settings-checkbox"><input type="checkbox" id="adEnabled" /> 启用地址自动发现</label>
-        <label class="settings-field" style="flex:2;">目标网址
-          <input type="text" id="adUrl" placeholder="https://briwanglu.com/status 或 http://192.168.113.9" />
-        </label>
-        <label class="settings-field">检查间隔（分钟）
-          <input type="number" id="adInterval" min="5" value="30" />
-        </label>
-      </div>
-      <div class="settings-row">
-        <label class="settings-field">分组（可选）
-          <input type="text" id="adGroup" placeholder="给自动发现的主机打个分组" />
-        </label>
-        <label class="settings-field" style="flex:2;">标签（可选，逗号分隔）
-          <input type="text" id="adTags" placeholder="例如：自动发现,家庭" />
-        </label>
-        <button type="button" id="adTestBtn" class="btn">🔍 立即测试</button>
-      </div>
-      <div id="adStatus" class="panel__hint" style="margin-top:4px;"></div>
-
-      <div class="console-head" style="margin-top:18px;">
-        <h3 class="settings-block__title" style="margin:0;">登录后再抓取（网页需要登录 / 有 Cloudflare 验证时用）</h3>
-      </div>
-      <p class="panel__hint">
-        目标网页需要先登录才能看到内容？在这里填登录页地址，点「开始交互式登录」——会打开一个远程浏览器的实时画面，
-        账号密码在<b>你自己的</b>电脑/手机浏览器里输入，遇到 Cloudflare 之类的勾选验证也是<b>你自己</b>去点
-        （这一步必须是真人操作，代码没法代劳）。登录成功后点「完成登录」，只会把这次拿到的 Cookie 存下来，
-        用户名/密码不会被保存，你也不需要手动复制粘贴任何 Cookie 字符串。之后定时抓取会自动带着这份 Cookie 去请求；
-        如果 Cookie 过期了，下方状态会变成「需要重新登录」，配置了通知的话也会收到提醒。
-      </p>
-      <div class="settings-row">
-        <label class="settings-field" style="flex:2;">登录页地址
-          <input type="text" id="adLoginUrl" placeholder="https://example.com/login" />
-        </label>
-        <button type="button" id="adLoginStartBtn" class="btn">🔐 开始交互式登录</button>
-      </div>
-      <div id="adAuthStatus" class="panel__hint" style="margin-top:4px;"></div>
-
-      <div id="adLoginModal" class="ad-login-modal" hidden>
-        <div class="ad-login-modal__box">
-          <div class="console-head" style="margin-bottom:8px;">
-            <h3 class="settings-block__title" style="margin:0;">远程浏览器 — 在这里登录</h3>
-            <button type="button" id="adLoginCancelBtn" class="btn btn--danger">✕ 取消</button>
-          </div>
-          <div class="settings-row">
-            <label class="settings-field">账号（可选，自动填）
-              <input type="text" id="adLoginUsername" autocomplete="off" />
-            </label>
-            <label class="settings-field">密码（可选，自动填）
-              <input type="password" id="adLoginPassword" autocomplete="off" />
-            </label>
-          </div>
-          <p class="panel__hint" style="margin:4px 0 8px;">
-            自动填了用户名/密码之后，如果页面出现验证框（比如 Cloudflare 的勾选框），请直接在下面画面里点击/操作——
-            那就是真的在远程浏览器里点，跟你自己打开网页点是一样的。全部弄好、确认已经登录成功之后，点右下角「完成登录，保存」。
-          </p>
-          <div id="adLoginCanvasWrap" class="ad-login-canvas-wrap">
-            <canvas id="adLoginCanvas" width="1280" height="800"></canvas>
-            <div id="adLoginOverlayMsg" class="ad-login-overlay-msg">正在连接远程浏览器…</div>
-          </div>
-          <div class="console-head" style="margin-top:10px;">
-            <span id="adLoginModalStatus" class="panel__hint" style="margin:0;"></span>
-            <button type="button" id="adLoginFinishBtn" class="btn btn--add">✅ 完成登录，保存</button>
-          </div>
+      <div id="modelsAllBody">
+        <p class="panel__hint">不管是当前工作区还是躺在归档里的记录，扫描到过的 主机+模型 都汇总在这一个列表，方便"恢复测试"——有些机器可能只是被你归档整理掉了，其实还在线。默认只显示当前工作区的记录，归档里的记录折叠隐藏，需要时再展开看。</p>
+        <div class="settings-row">
+          <button id="modelsAllRefreshBtn" class="btn">🔄 刷新列表</button>
+          <button id="modelsAllQuickTestBtn" class="btn btn--add">⚡ 一键测试全部在线状态</button>
+          <button id="modelsAllHeadlessTestBtn" class="btn">🌐 一键测试无头浏览器支持（仅在线的）</button>
         </div>
+        <div id="modelsAllList" class="lb-table"></div>
+        <button type="button" id="modelsAllShowArchivedBtn" class="btn" style="margin-top:8px;">📦 显示归档中的记录</button>
       </div>
-
-      <div class="console-head" style="margin-top:18px;">
-        <h3 class="settings-block__title" style="margin:0;">运行记录</h3>
-        <div>
-          <label class="settings-checkbox" style="margin-right:10px;"><input type="checkbox" id="adLogAutoRefresh" checked /> 每 15 秒自动刷新</label>
-          <button id="adLogRefreshBtn" class="btn">↻ 刷新</button>
-          <button id="adLogClearBtn" class="btn btn--danger">🗑 清空记录</button>
-        </div>
-      </div>
-      <p class="panel__hint">手动测试和定时触发都会记一条在这里，落盘保存——刷新页面、关掉浏览器重新打开都还看得到，不是只有最近一次。</p>
-      <div id="adLogList" class="audit-list"></div>
-      <p id="adLogEmpty" class="host-empty">还没有运行记录。</p>
     </section>
   </main>
 
